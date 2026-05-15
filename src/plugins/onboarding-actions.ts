@@ -225,6 +225,33 @@ export const handleOnboardingInputAction: Action = {
     ) {
       const fields = MEMBER_FIELDS[ctx.communityType];
       const memberDraft = ctx.memberDraft ?? {};
+      const normalized = input.toLowerCase();
+      const isDone = [
+        "selesai",
+        "tidak",
+        "stop",
+        "done",
+        "sudah",
+        "cukup",
+      ].includes(normalized);
+
+      if (isDone) {
+        await clearCtx(runtime);
+        const memberCount = ctx.memberCount ?? 0;
+        const text = [
+          `Setup selesai! ${memberCount} anggota terdaftar di komunitas.`,
+          ``,
+          `Kamu sekarang bisa:`,
+          `- "Tagih iuran bulan ini" — buat invoice DOKU untuk semua anggota`,
+          `- "Berapa saldo kas?" — cek saldo`,
+          `- "Siapa yang belum bayar?" — lihat tunggakan`,
+        ].join("\n");
+        await sendCallback(callback, message, text, [
+          "HANDLE_ONBOARDING_INPUT",
+        ]);
+        return { success: true };
+      }
+
       const nextField = fields.find(
         (f) => !f.optional && !(memberDraft as any)[f.key],
       );
@@ -310,29 +337,6 @@ export const handleOnboardingInputAction: Action = {
           `Anggota ke-${memberCount} (${md.name}) berhasil ditambahkan.`,
           ``,
           `Tambah anggota lagi? Ketik nama anggota berikutnya, atau ketik "selesai" untuk mengakhiri.`,
-        ].join("\n");
-        await sendCallback(callback, message, text, [
-          "HANDLE_ONBOARDING_INPUT",
-        ]);
-        return { success: true };
-      }
-
-      const normalized = input.toLowerCase();
-      if (
-        normalized === "selesai" ||
-        normalized === "tidak" ||
-        normalized === "stop" ||
-        normalized === "done"
-      ) {
-        await clearCtx(runtime);
-        const memberCount = ctx.memberCount ?? 0;
-        const text = [
-          `Setup selesai! ${memberCount} anggota terdaftar di komunitas.`,
-          ``,
-          `Kamu sekarang bisa:`,
-          `- "Tagih iuran bulan ini" — buat invoice DOKU untuk semua anggota`,
-          `- "Berapa saldo kas?" — cek saldo`,
-          `- "Siapa yang belum bayar?" — lihat tunggakan`,
         ].join("\n");
         await sendCallback(callback, message, text, [
           "HANDLE_ONBOARDING_INPUT",

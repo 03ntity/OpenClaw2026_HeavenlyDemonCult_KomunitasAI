@@ -15,6 +15,12 @@ import {
   sendCallback,
   toMonth,
 } from "./helpers.ts";
+import * as dbModule from "../database/db.ts";
+
+const pendingResetConfirmations = new Map<
+  string,
+  { communityId: string; ts: number }
+>();
 
 // ── GET_ALL_MEMBERS ─────────────────────────────────────────────────────
 
@@ -1004,8 +1010,6 @@ export const fullBillingWorkflowAction: Action = {
   ],
 };
 
-import * as dbModule from "../database/db.ts";
-
 type ResetIntent =
   | "confirm_transactions"
   | "confirm_all"
@@ -1064,26 +1068,18 @@ export const resetCommunityDataAction: Action = {
     const input = (message.content.text ?? "").trim();
     const resetType = getStringOption(options, "type");
 
-    const intent =
-      resetType === "all"
-        ? "confirm_all"
-        : resetType === "transactions"
-          ? "confirm_transactions"
-          : await classifyResetIntent(runtime, input);
+    const pendingKey = `${runtime.agentId}`;
+    const pending = pendingResetConfirmations.get(pendingKey);
+    const FIVE_MINUTES = 5 * 60 * 1000;
+    const isStillPending = pending && Date.now() - pending.ts < FIVE_MINUTES;
 
-    if (intent === "cancel") {
-      const text = `Oke, tidak jadi hapus data. Data komunitas "${community.name}" tetap aman. 😊`;
-      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
-      return { success: true, data: { cancelled: true } };
-    }
-
-    if (
-      intent === "unknown" ||
-      (intent === "confirm_transactions" && !resetType) ||
-      (intent === "confirm_all" && !resetType)
-    ) {
+    if (!isStillPending && !resetType) {
       const invoices = await service.listInvoices(community.id);
       const members = await service.listMembers(community.id);
+      pendingResetConfirmations.set(pendingKey, {
+        communityId: community.id,
+        ts: Date.now(),
+      });
       const text = [
         `⚠️ Kamu mau bersihkan data apa untuk komunitas **"${community.name}"**?`,
         ``,
@@ -1099,6 +1095,24 @@ export const resetCommunityDataAction: Action = {
       ].join("\n");
       await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
       return { success: true, data: { awaitingConfirmation: true } };
+    }
+
+    pendingResetConfirmations.delete(pendingKey);
+
+    const intent =
+      resetType === "all"
+        ? "confirm_all"
+        : resetType === "transactions"
+          ? "confirm_transactions"
+          : await classifyResetIntent(runtime, input);
+
+    if (intent === "cancel" || intent === "unknown") {
+      const text =
+        intent === "cancel"
+          ? `Oke, tidak jadi hapus data. Data komunitas "${community.name}" tetap aman. 😊`
+          : `Tidak yakin maksudnya apa. Data tidak dihapus. Ketik "hapus data komunitas" untuk mulai ulang.`;
+      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
+      return { success: true, data: { cancelled: true } };
     }
 
     if (intent === "confirm_all") {

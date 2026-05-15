@@ -5,6 +5,7 @@ import { onboardingActions } from "./onboarding-actions.ts";
 import { komunitasProvider } from "./provider.ts";
 import { allRoutes } from "./routes.ts";
 import { KomunitasService } from "./komunitas-service.ts";
+import { komunitasEvaluator } from "./evaluator.ts";
 
 export { KomunitasService, getKomunitasService } from "./komunitas-service.ts";
 
@@ -52,6 +53,7 @@ const plugin: Plugin = {
   services: [KomunitasService],
   actions: [...onboardingActions, ...allActions],
   providers: [komunitasProvider],
+  evaluators: [komunitasEvaluator],
   routes: allRoutes,
 };
 

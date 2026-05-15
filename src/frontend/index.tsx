@@ -1267,37 +1267,87 @@ type ChatMessage = {
 
 async function sendChatMessage(agentId: string, text: string): Promise<string> {
   const base = apiBase();
-  const response = await fetch(`${base}/${agentId}/message`, {
+  const channelId = `dashboard-${agentId}`;
+  const response = await fetch(`${base}/api/messaging/submit`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      text,
-      userId: "dashboard-user",
-      roomId: "dashboard",
+      channel_id: channelId,
+      message_server_id: "00000000-0000-0000-0000-000000000000",
+      author_id: "dashboard-user",
+      content: text,
+      source_type: "user",
+      raw_message: { text },
+      metadata: { agentId },
     }),
   });
-  const data = await response.json().catch(() => []);
-  if (Array.isArray(data) && data.length > 0) {
-    return data.map((m: any) => m.text ?? "").join("\n");
+  const data = await response.json().catch(() => ({}));
+  if (data?.data?.id) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const msgRes = await fetch(
+      `${base}/api/messaging/channels/${channelId}/messages?limit=5`,
+    ).catch(() => null);
+    if (msgRes?.ok) {
+      const msgData = await msgRes.json().catch(() => ({}));
+      const msgs: any[] = msgData?.data?.messages ?? msgData?.messages ?? [];
+      const agentMsg = msgs
+        .filter((m: any) => m.authorId === agentId || m.author_id === agentId)
+        .sort((a: any, b: any) => b.createdAt - a.createdAt)[0];
+      if (agentMsg?.content) return agentMsg.content;
+    }
   }
-  if (data?.text) return data.text;
-  return "Maaf, tidak ada respons dari agent.";
+  if (data?.error)
+    return `Error: ${typeof data.error === "string" ? data.error : JSON.stringify(data.error)}`;
+  return "Pesan terkirim. Tunggu respons agent di chat utama.";
 }
 
 function ChatWidget() {
-  const agentId = window.ELIZA_CONFIG?.agentId ?? "";
+  const [agentId, setAgentId] = React.useState<string>(
+    window.ELIZA_CONFIG?.agentId ?? "",
+  );
+  const [agentName, setAgentName] = React.useState<string>("BendaharaAI");
   const [open, setOpen] = React.useState(false);
   const [messages, setMessages] = React.useState<ChatMessage[]>([
     {
       id: "welcome",
       role: "agent",
-      text: "Halo! Saya BendaharaAI. Tanya apa saja tentang kas, iuran, atau invoice komunitas.",
+      text: "Halo! Saya BendaharaAI 💰. Tanya apa saja tentang kas, iuran, atau invoice komunitas.",
       ts: Date.now(),
     },
   ]);
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const bottomRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    const fetchAgents = async () => {
+      try {
+        const res = await fetch(`${apiBase()}/api/agents`);
+        const data = await res.json();
+        const agents: Array<{ id: string; name: string }> =
+          data?.data ?? data?.agents ?? [];
+        if (agents.length > 0) {
+          const preferred =
+            agents.find(
+              (a) =>
+                a.name?.toLowerCase().includes("bendahara") ||
+                a.name?.toLowerCase().includes("komunitas"),
+            ) ?? agents[0];
+          setAgentId(preferred.id);
+          setAgentName(preferred.name ?? "BendaharaAI");
+          setMessages([
+            {
+              id: "welcome",
+              role: "agent",
+              text: `Halo! Saya ${preferred.name ?? "BendaharaAI"} 💰. Tanya apa saja tentang kas, iuran, atau invoice komunitas.`,
+              ts: Date.now(),
+            },
+          ]);
+        }
+      } catch {}
+    };
+    fetchAgents();
+  }, []);
 
   React.useEffect(() => {
     if (open) bottomRef.current?.scrollIntoView({ behavior: "smooth" });

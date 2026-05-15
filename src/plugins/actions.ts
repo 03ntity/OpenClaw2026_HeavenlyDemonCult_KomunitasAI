@@ -102,9 +102,28 @@ export const createPaymentLinkAction: Action = {
   ): Promise<ActionResult> => {
     try {
       const service = getKomunitasService(runtime);
+      let memberId = getStringOption(options, "memberId");
+
+      if (!memberId) {
+        const messageText = (message.content.text ?? "").toLowerCase();
+        const members = await service.listMembers();
+        const matched = members.find(
+          (member) =>
+            messageText.includes(member.name.toLowerCase()) ||
+            member.name
+              .toLowerCase()
+              .split(" ")
+              .some((word) => word.length > 2 && messageText.includes(word)),
+        );
+
+        if (matched) {
+          memberId = matched.id;
+        }
+      }
+
       const result = await service.createPaymentLinkForMember({
         communityId: getStringOption(options, "communityId"),
-        memberId: getStringOption(options, "memberId"),
+        memberId,
         period: getStringOption(options, "period"),
         amount: getNumberOption(options, "amount"),
         dueDays: getNumberOption(options, "dueDays"),

@@ -1,6 +1,7 @@
 import {
   type Content,
   type HandlerCallback,
+  type IAgentRuntime,
   type Memory,
   type RouteResponse,
 } from "@elizaos/core";
@@ -119,6 +120,41 @@ export const sendCallback = async (
     source: message.content.source,
   };
   await callback?.(content);
+};
+
+export const validateHasCommunity = async (
+  runtime: IAgentRuntime,
+): Promise<boolean> => {
+  try {
+    const service = runtime.getService("komunitas") as any;
+    if (!service) return false;
+    const communities = await service.listCommunities();
+    return communities.length > 0;
+  } catch {
+    return false;
+  }
+};
+
+export const isOnboardingRequired = (error: unknown): boolean => {
+  return (
+    error instanceof Error && error.message.startsWith("ONBOARDING_REQUIRED")
+  );
+};
+
+export const handleOnboardingError = async (
+  error: unknown,
+  callback: HandlerCallback | undefined,
+  message: Memory,
+  actionName: string,
+): Promise<boolean> => {
+  if (!isOnboardingRequired(error)) return false;
+  await sendCallback(
+    callback,
+    message,
+    "Belum ada komunitas yang terdaftar. Ketik 'buat komunitas baru' untuk memulai setup.",
+    [actionName],
+  );
+  return true;
 };
 
 export const getOption = (options: unknown, key: string) =>

@@ -220,14 +220,33 @@ export class KomunitasService extends Service {
       `KAI${period}${member.id}${Date.now()}`,
     );
     const description = `Iuran ${community.name} ${period}`;
-    const payment = await this.doku.createPaymentLink({
-      invoiceNumber,
-      amount,
-      description,
-      customerName: member.name,
-      customerPhone: member.phone,
-      dueMinutes: dueDays * 24 * 60,
-    });
+
+    let paymentUrl = "";
+    let dokuInvoiceId = invoiceNumber;
+    let dokuRequestId = randomUUID() as string;
+
+    try {
+      const payment = await this.doku.createPaymentLink({
+        invoiceNumber,
+        amount,
+        description,
+        customerName: member.name,
+        customerPhone: member.phone,
+        dueMinutes: dueDays * 24 * 60,
+      });
+      paymentUrl = payment.paymentUrl;
+      dokuInvoiceId = payment.invoiceNumber;
+      dokuRequestId = payment.requestId;
+    } catch (e) {
+      logger.warn(
+        {
+          memberId: member.id,
+          error: e instanceof Error ? e.message : String(e),
+        },
+        "DOKU payment link creation failed, creating invoice without payment link",
+      );
+    }
+
     const invoiceRow = await db.createInvoice({
       id: randomUUID(),
       communityId: community.id,
@@ -236,9 +255,9 @@ export class KomunitasService extends Service {
       description,
       period,
       dueDate: addDays(new Date(), dueDays).toISOString().slice(0, 10),
-      paymentLink: payment.paymentUrl,
-      dokuInvoiceId: payment.invoiceNumber,
-      dokuRequestId: payment.requestId,
+      paymentLink: paymentUrl,
+      dokuInvoiceId,
+      dokuRequestId,
     });
     const invoice = rowToInvoice(invoiceRow);
     await this.log(community.id, "invoice_created", {

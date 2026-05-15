@@ -1,4 +1,5 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
+import { logger } from "@elizaos/core";
 import type {
   DokuPaymentParams,
   DokuPaymentResult,
@@ -8,6 +9,23 @@ import type {
 import { getHeader } from "./helpers.ts";
 
 const MCP_SANDBOX_URL = "https://api-sandbox.doku.com/doku-mcp-server/mcp";
+
+function sanitizeName(name: string): string {
+  return (
+    (name ?? "Customer")
+      .replace(/[^a-zA-Z0-9 ]/g, "")
+      .trim()
+      .slice(0, 50) || "Customer"
+  );
+}
+
+function sanitizePhone(phone?: string): string {
+  if (!phone) return "08000000000";
+  const digits = phone.replace(/[^0-9]/g, "");
+  if (digits.length < 5) return "08000000000";
+  if (digits.length > 16) return digits.slice(0, 16);
+  return digits;
+}
 
 type JsonRpcResponse = {
   jsonrpc: string;
@@ -59,28 +77,48 @@ export class DokuMcpClient {
       invoiceNumber: params.invoiceNumber,
       amount: params.amount,
       currency: "IDR",
-      customerName: params.customerName,
-      customerPhone: params.customerPhone ?? "",
+      customerName: sanitizeName(params.customerName),
+      customerPhone: sanitizePhone(params.customerPhone),
       customerEmail: params.customerEmail ?? "",
     };
 
     const raw = await this.callTool<{
-      response: {
-        order: { invoice_number: string };
-        payment: {
-          url: string;
-          token_id: string;
-          expired_date: string;
-          expired_datetime: string;
+      message?: string | string[];
+      invoiceNumber?: string;
+      response?: {
+        order?: { invoice_number?: string };
+        payment?: {
+          url?: string;
+          token_id?: string;
+          expired_date?: string;
+          expired_datetime?: string;
         };
       };
     }>("create_doku_direct_checkout", toolRequest);
 
+    logger.info(
+      {
+        rawKeys: raw ? Object.keys(raw) : null,
+        hasResponse: !!raw?.response,
+        hasPayment: !!raw?.response?.payment,
+      },
+      "DOKU MCP createPaymentLink raw response",
+    );
+
+    const payment = raw?.response?.payment;
+    const order = raw?.response?.order;
+
+    if (!payment?.url) {
+      throw new Error(
+        `DOKU MCP tidak mengembalikan payment URL. Response: ${JSON.stringify(raw).slice(0, 200)}`,
+      );
+    }
+
     return {
-      requestId: raw.response.payment.token_id,
-      invoiceNumber: raw.response.order.invoice_number,
-      paymentUrl: raw.response.payment.url,
-      expiresAt: raw.response.payment.expired_datetime,
+      requestId: payment.token_id ?? randomUUID(),
+      invoiceNumber: order?.invoice_number ?? params.invoiceNumber,
+      paymentUrl: payment.url,
+      expiresAt: payment.expired_datetime,
       raw,
     };
   }
@@ -270,13 +308,26 @@ export class DokuMcpClient {
       throw new Error(`${msg} ${detail}`.trim());
     }
 
-    // Parse the tool response from MCP content format
     if (
       json.result?.content &&
       Array.isArray(json.result.content) &&
       json.result.content[0]?.text
     ) {
-      return JSON.parse(json.result.content[0].text) as T;
+      const text = json.result.content[0].text;
+      try {
+        const parsed = typeof text === "string" ? JSON.parse(text) : text;
+        logger.debug(
+          { toolName, parsedKeys: parsed ? Object.keys(parsed) : null },
+          "DOKU MCP tool response parsed",
+        );
+        return parsed as T;
+      } catch (e) {
+        logger.error(
+          { toolName, text: text.slice(0, 200), error: String(e) },
+          "DOKU MCP failed to parse tool response text",
+        );
+        throw new Error(`DOKU MCP response parse error: ${String(e)}`);
+      }
     }
 
     return json.result as unknown as T;

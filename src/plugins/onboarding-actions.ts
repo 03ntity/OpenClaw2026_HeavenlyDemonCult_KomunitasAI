@@ -37,6 +37,21 @@ async function clearCtx(runtime: IAgentRuntime) {
   await db.setOnboardingState(runtime.agentId, { state: "READY" });
 }
 
+function parseBatchMembers(input: string): string[] {
+  const lines = input.split(/[\n,;]+/);
+  return lines
+    .map((line) => line.replace(/^\s*\d+[\.\)]\s*/, "").trim())
+    .filter((line) => line.length > 1);
+}
+
+function isBatchInput(input: string): boolean {
+  return (
+    input.includes("\n") ||
+    input.includes(",") ||
+    /^\d+[\.\)]/.test(input.trim())
+  );
+}
+
 export const startOnboardingAction: Action = {
   name: "START_ONBOARDING",
   similes: ["SETUP_KOMUNITAS", "BUAT_KOMUNITAS_BARU", "MULAI_SETUP"],
@@ -213,6 +228,40 @@ export const handleOnboardingInputAction: Action = {
       const nextField = fields.find(
         (f) => !f.optional && !(memberDraft as any)[f.key],
       );
+
+      // Detect batch input — multiple names separated by newline/comma
+      if (nextField?.key === "name" && isBatchInput(input)) {
+        const names = parseBatchMembers(input);
+        if (names.length > 1) {
+          let memberCount = ctx.memberCount ?? 0;
+          for (const name of names) {
+            const memberId = `member-${randomUUID().slice(0, 8)}`;
+            await db.upsertMember({
+              id: memberId,
+              communityId: ctx.communityId,
+              name,
+            });
+            memberCount++;
+          }
+          const updatedCtx: OnboardingContext = {
+            ...ctx,
+            memberDraft: {},
+            memberCount,
+          };
+          await saveCtx(runtime, updatedCtx);
+          const text = [
+            `✅ ${names.length} anggota berhasil ditambahkan sekaligus:`,
+            names.map((n, i) => `${i + 1}. ${n}`).join("\n"),
+            ``,
+            `Total anggota terdaftar: ${memberCount} orang.`,
+            `Tambah lagi? Ketik nama atau "selesai" untuk mengakhiri.`,
+          ].join("\n");
+          await sendCallback(callback, message, text, [
+            "HANDLE_ONBOARDING_INPUT",
+          ]);
+          return { success: true };
+        }
+      }
 
       if (nextField) {
         (memberDraft as any)[nextField.key] = input;

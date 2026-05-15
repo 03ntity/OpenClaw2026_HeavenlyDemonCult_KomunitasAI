@@ -9,6 +9,8 @@ import {
   getKasEntryTypeOption,
   getNumberOption,
   getStringOption,
+  handleOnboardingError,
+  validateHasCommunity,
   rupiah,
   sendCallback,
   toMonth,
@@ -20,7 +22,7 @@ export const getAllMembersAction: Action = {
   name: "GET_ALL_MEMBERS",
   similes: ["LIST_MEMBERS", "CEK_ANGGOTA", "DAFTAR_ANGGOTA"],
   description: "Lists all active members in the active community.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -63,7 +65,7 @@ export const createPaymentLinkAction: Action = {
   name: "CREATE_PAYMENT_LINK",
   similes: ["CREATE_SINGLE_INVOICE", "BUAT_PAYMENT_LINK", "TAGIH_ANGGOTA"],
   description: "Creates one DOKU Checkout payment link for an active member.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -123,7 +125,7 @@ export const bulkCreateInvoicesAction: Action = {
   similes: ["TAGIH_IURAN", "CREATE_PAYMENT_LINKS", "BULK_BILLING"],
   description:
     "Creates DOKU Checkout payment links for all active community members.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -175,7 +177,7 @@ export const checkPaymentStatusAction: Action = {
   name: "CHECK_PAYMENT_STATUS",
   similes: ["CEK_STATUS_PEMBAYARAN", "MONITOR_PAYMENT", "CHECK_DOKU_STATUS"],
   description: "Checks a pending invoice payment status through DOKU.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -225,7 +227,7 @@ export const runMonitoringLoopAction: Action = {
   name: "RUN_MONITORING_LOOP",
   similes: ["CHECK_PENDING_PAYMENTS", "RUN_PAYMENT_MONITORING_LOOP"],
   description: "Runs payment monitoring for all pending invoices.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -275,7 +277,7 @@ export const simulatePaymentAction: Action = {
   name: "SIMULATE_PAYMENT",
   similes: ["SIMULASI_BAYAR", "DEMO_PAYMENT", "SIMULATE_DOKU_WEBHOOK"],
   description: "Marks a pending invoice as paid for local demo simulation.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -326,7 +328,7 @@ export const getUnpaidInvoicesAction: Action = {
   name: "GET_UNPAID_INVOICES",
   similes: ["CEK_BELUM_BAYAR", "WHO_IS_UNPAID", "LIST_PENDING_INVOICES"],
   description: "Lists members with pending invoices for the current month.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -377,7 +379,7 @@ export const sendReminderAction: Action = {
   similes: ["KIRIM_REMINDER", "REMIND_UNPAID_MEMBERS"],
   description:
     "Increments reminder counters for pending invoices and records reminder logs.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -414,19 +416,80 @@ export const getKasSummaryAction: Action = {
   name: "GET_KAS_SUMMARY",
   similes: ["CEK_SALDO_KAS", "KAS_SUMMARY", "SALDO_KOMUNITAS"],
   description: "Returns the current cash balance summary.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
     _state,
-    _options,
+    options,
     callback,
   ): Promise<ActionResult> => {
     const service = getKomunitasService(runtime);
-    const summary = await service.getKasSummary();
-    const text = `Saldo kas saat ini ${rupiah(summary.currentBalance)}. Total pemasukan ${rupiah(summary.totalIncome)}, total pengeluaran ${rupiah(summary.totalExpense)}.`;
-    await sendCallback(callback, message, text, ["GET_KAS_SUMMARY"]);
-    return { success: true, data: summary };
+    const community = await service.getCommunity();
+    const input = (message.content.text ?? "").trim();
+    const resetType = getStringOption(options, "type");
+
+    const isPendingConfirmation = await dbModule.getOnboardingState(
+      `reset_confirm_${runtime.agentId}`,
+    );
+
+    if (!isPendingConfirmation) {
+      const invoices = await service.listInvoices(community.id);
+      const members = await service.listMembers(community.id);
+      await dbModule.setOnboardingState(`reset_confirm_${runtime.agentId}`, {
+        pending: true,
+        communityId: community.id,
+      });
+      const text = [
+        `⚠️ Kamu mau bersihkan data apa untuk komunitas **"${community.name}"**?`,
+        ``,
+        `**Opsi 1 — Hapus transaksi saja** (anggota tetap ada):`,
+        `- ${invoices.length} invoice`,
+        `- Semua catatan kas & log aktivitas`,
+        `→ Balas: **"hapus transaksi saja"**`,
+        ``,
+        `**Opsi 2 — Hapus semua data** (termasuk ${members.length} anggota & komunitas):`,
+        `→ Balas: **"hapus semua data"**`,
+        ``,
+        `Atau balas **"batal"** untuk membatalkan.`,
+      ].join("\n");
+      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
+      return { success: true, data: { awaitingConfirmation: true } };
+    }
+
+    await dbModule.clearOnboardingState(`reset_confirm_${runtime.agentId}`);
+
+    const intent =
+      resetType === "all"
+        ? "confirm_all"
+        : resetType === "transactions"
+          ? "confirm_transactions"
+          : await classifyResetIntent(runtime, input);
+
+    if (intent === "cancel" || intent === "unknown") {
+      const text =
+        intent === "cancel"
+          ? `Oke, tidak jadi hapus data. Data komunitas "${community.name}" tetap aman. 😊`
+          : `Tidak yakin maksudnya apa. Data tidak dihapus. Ketik "hapus data komunitas" untuk mulai ulang.`;
+      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
+      return { success: true, data: { cancelled: true } };
+    }
+
+    if (intent === "confirm_all") {
+      await dbModule.resetCommunityData(community.id);
+      await dbModule.clearOnboardingState(runtime.agentId);
+      const text = `✅ Semua data komunitas "${community.name}" telah dihapus. Ketik "buat komunitas baru" untuk setup ulang.`;
+      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
+    } else {
+      await dbModule.resetCommunityTransactions(community.id);
+      const text = `✅ Data transaksi komunitas "${community.name}" telah dibersihkan. Anggota dan komunitas tetap ada.`;
+      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
+    }
+
+    return {
+      success: true,
+      data: { reset: true, intent, communityId: community.id },
+    };
   },
   examples: [
     [
@@ -449,7 +512,7 @@ export const answerKasQueryAction: Action = {
   similes: ["JAWAB_PERTANYAAN_KAS", "QUERY_KAS", "TANYA_SALDO"],
   description:
     "Answers natural language cash summary questions using actual kas data.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -494,7 +557,7 @@ export const updateKasBalanceAction: Action = {
   name: "UPDATE_KAS_BALANCE",
   similes: ["CATAT_KAS", "TAMBAH_TRANSAKSI_KAS", "RECORD_KAS_ENTRY"],
   description: "Records one income or expense entry in community cash ledger.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -546,7 +609,7 @@ export const markInvoicePaidManualAction: Action = {
   similes: ["TANDAI_LUNAS", "MARK_PAID_MANUAL", "BAYAR_TUNAI"],
   description:
     "Marks one pending invoice as paid manually and records kas income once.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -597,7 +660,7 @@ export const generateMonthlyReportAction: Action = {
   name: "GENERATE_MONTHLY_REPORT",
   similes: ["BUAT_LAPORAN", "MONTHLY_REPORT", "LAPORAN_BULANAN"],
   description: "Generates a monthly finance report for the community.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -637,7 +700,7 @@ export const detectPaymentAnomalyAction: Action = {
   name: "DETECT_PAYMENT_ANOMALY",
   similes: ["DETEKSI_ANOMALI", "CEK_YANG_SERING_TELAT", "PAYMENT_ANOMALY"],
   description: "Detects overdue or repeatedly reminded pending invoices.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -683,7 +746,7 @@ export const runBillingLoopAction: Action = {
   name: "RUN_BILLING_LOOP",
   similes: ["RUN_MONTHLY_BILLING_LOOP", "JALANKAN_LOOP_TAGIHAN"],
   description: "Runs the manual monthly billing loop for demo.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -737,7 +800,7 @@ export const runReportLoopAction: Action = {
   name: "RUN_REPORT_LOOP",
   similes: ["RUN_MONTHLY_REPORT_LOOP", "JALANKAN_LOOP_LAPORAN"],
   description: "Runs the manual monthly report loop for demo.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -775,7 +838,7 @@ export const calculateSplitBillAction: Action = {
   similes: ["HITUNG_PATUNGAN", "SPLIT_BILL", "BAGI_BIAYA", "HITUNG_BAGI_RATA"],
   description:
     "Calculates split bill — divides total expenses equally among active members and shows who owes what.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -848,7 +911,7 @@ export const fullBillingWorkflowAction: Action = {
   ],
   description:
     "Autonomous multi-step workflow: create invoices → check payments → send reminders → generate report.",
-  validate: async () => true,
+  validate: validateHasCommunity,
   handler: async (
     runtime,
     message,
@@ -941,6 +1004,133 @@ export const fullBillingWorkflowAction: Action = {
   ],
 };
 
+import * as dbModule from "../database/db.ts";
+
+type ResetIntent =
+  | "confirm_transactions"
+  | "confirm_all"
+  | "cancel"
+  | "unknown";
+
+async function classifyResetIntent(
+  runtime: IAgentRuntime,
+  userInput: string,
+): Promise<ResetIntent> {
+  const result = await (runtime as any).generateText({
+    context: `Klasifikasikan intent user berdasarkan input berikut.
+
+Input user: "${userInput}"
+
+Pilih SATU dari opsi berikut:
+- confirm_transactions: user mengkonfirmasi hapus data transaksi saja (invoice, kas, log) tapi anggota tetap
+- confirm_all: user mengkonfirmasi hapus SEMUA data termasuk anggota dan komunitas
+- cancel: user membatalkan atau tidak mau hapus
+- unknown: tidak jelas, perlu konfirmasi ulang
+
+Jawab HANYA dengan satu kata dari opsi di atas, tanpa penjelasan tambahan apapun.`,
+  });
+
+  const trimmed = (result ?? "").trim().toLowerCase() as ResetIntent;
+  const valid: ResetIntent[] = [
+    "confirm_transactions",
+    "confirm_all",
+    "cancel",
+    "unknown",
+  ];
+  return valid.includes(trimmed) ? trimmed : "unknown";
+}
+
+export const resetCommunityDataAction: Action = {
+  name: "RESET_COMMUNITY_DATA",
+  similes: [
+    "HAPUS_DATA",
+    "RESET_DATA",
+    "BERSIHKAN_DATABASE",
+    "FLUSH_DATABASE",
+    "HAPUS_SEMUA",
+  ],
+  description:
+    "Resets community data after user confirmation. Uses LLM to interpret user intent before proceeding.",
+  validate: validateHasCommunity,
+  handler: async (
+    runtime,
+    message,
+    _state,
+    options,
+    callback,
+  ): Promise<ActionResult> => {
+    const service = getKomunitasService(runtime);
+    const community = await service.getCommunity();
+    const input = (message.content.text ?? "").trim();
+    const resetType = getStringOption(options, "type");
+
+    const intent =
+      resetType === "all"
+        ? "confirm_all"
+        : resetType === "transactions"
+          ? "confirm_transactions"
+          : await classifyResetIntent(runtime, input);
+
+    if (intent === "cancel") {
+      const text = `Oke, tidak jadi hapus data. Data komunitas "${community.name}" tetap aman. 😊`;
+      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
+      return { success: true, data: { cancelled: true } };
+    }
+
+    if (
+      intent === "unknown" ||
+      (intent === "confirm_transactions" && !resetType) ||
+      (intent === "confirm_all" && !resetType)
+    ) {
+      const invoices = await service.listInvoices(community.id);
+      const members = await service.listMembers(community.id);
+      const text = [
+        `⚠️ Kamu mau bersihkan data apa untuk komunitas **"${community.name}"**?`,
+        ``,
+        `**Opsi 1 — Hapus transaksi saja** (anggota tetap ada):`,
+        `- ${invoices.length} invoice`,
+        `- Semua catatan kas & log aktivitas`,
+        `→ Balas: **"hapus transaksi saja"**`,
+        ``,
+        `**Opsi 2 — Hapus semua data** (termasuk ${members.length} anggota & komunitas):`,
+        `→ Balas: **"hapus semua data"**`,
+        ``,
+        `Atau balas **"batal"** untuk membatalkan.`,
+      ].join("\n");
+      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
+      return { success: true, data: { awaitingConfirmation: true } };
+    }
+
+    if (intent === "confirm_all") {
+      await dbModule.resetCommunityData(community.id);
+      await dbModule.clearOnboardingState(runtime.agentId);
+      const text = `✅ Semua data komunitas "${community.name}" telah dihapus. Ketik "buat komunitas baru" untuk setup ulang.`;
+      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
+    } else {
+      await dbModule.resetCommunityTransactions(community.id);
+      const text = `✅ Data transaksi komunitas "${community.name}" telah dibersihkan. Anggota dan komunitas tetap ada.`;
+      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
+    }
+
+    return {
+      success: true,
+      data: { reset: true, intent, communityId: community.id },
+    };
+  },
+  examples: [
+    [
+      { name: "{{name1}}", content: { text: "hapus semua data komunitas" } },
+      {
+        name: "{{name2}}",
+        content: {
+          text: "⚠️ Aku perlu konfirmasi sebelum menghapus data.",
+          actions: ["RESET_COMMUNITY_DATA"],
+        },
+      },
+    ],
+  ],
+};
+
 // ── Exported list ───────────────────────────────────────────────────────
 
 export const allActions: Action[] = [
@@ -962,4 +1152,5 @@ export const allActions: Action[] = [
   runReportLoopAction,
   calculateSplitBillAction,
   fullBillingWorkflowAction,
+  resetCommunityDataAction,
 ];

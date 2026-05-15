@@ -508,6 +508,56 @@ export async function createLog(data: {
   return mapAgentLog(rows[0]);
 }
 
+export async function resetCommunityData(communityId: string): Promise<void> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM agent_logs WHERE community_id = $1", [
+      communityId,
+    ]);
+    await client.query("DELETE FROM kas_entries WHERE community_id = $1", [
+      communityId,
+    ]);
+    await client.query("DELETE FROM invoices WHERE community_id = $1", [
+      communityId,
+    ]);
+    await client.query("DELETE FROM members WHERE community_id = $1", [
+      communityId,
+    ]);
+    await client.query("DELETE FROM communities WHERE id = $1", [communityId]);
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function resetCommunityTransactions(
+  communityId: string,
+): Promise<void> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM agent_logs WHERE community_id = $1", [
+      communityId,
+    ]);
+    await client.query("DELETE FROM kas_entries WHERE community_id = $1", [
+      communityId,
+    ]);
+    await client.query("DELETE FROM invoices WHERE community_id = $1", [
+      communityId,
+    ]);
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Onboarding State (persistent across sessions/restarts)
 // ---------------------------------------------------------------------------

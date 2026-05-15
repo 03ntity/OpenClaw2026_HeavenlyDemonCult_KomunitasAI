@@ -13,7 +13,6 @@ import {
   sendCallback,
   toMonth,
 } from "./helpers.ts";
-import { defaultCommunityId } from "./types.ts";
 
 // ── GET_ALL_MEMBERS ─────────────────────────────────────────────────────
 
@@ -64,7 +63,7 @@ export const createPaymentLinkAction: Action = {
   name: "CREATE_PAYMENT_LINK",
   similes: ["CREATE_SINGLE_INVOICE", "BUAT_PAYMENT_LINK", "TAGIH_ANGGOTA"],
   description: "Creates one DOKU Checkout payment link for an active member.",
-  validate: async (runtime) => getKomunitasService(runtime).isDokuConfigured(),
+  validate: async () => true,
   handler: async (
     runtime,
     message,
@@ -124,7 +123,7 @@ export const bulkCreateInvoicesAction: Action = {
   similes: ["TAGIH_IURAN", "CREATE_PAYMENT_LINKS", "BULK_BILLING"],
   description:
     "Creates DOKU Checkout payment links for all active community members.",
-  validate: async (runtime) => getKomunitasService(runtime).isDokuConfigured(),
+  validate: async () => true,
   handler: async (
     runtime,
     message,
@@ -176,7 +175,7 @@ export const checkPaymentStatusAction: Action = {
   name: "CHECK_PAYMENT_STATUS",
   similes: ["CEK_STATUS_PEMBAYARAN", "MONITOR_PAYMENT", "CHECK_DOKU_STATUS"],
   description: "Checks a pending invoice payment status through DOKU.",
-  validate: async (runtime) => getKomunitasService(runtime).isDokuConfigured(),
+  validate: async () => true,
   handler: async (
     runtime,
     message,
@@ -226,7 +225,7 @@ export const runMonitoringLoopAction: Action = {
   name: "RUN_MONITORING_LOOP",
   similes: ["CHECK_PENDING_PAYMENTS", "RUN_PAYMENT_MONITORING_LOOP"],
   description: "Runs payment monitoring for all pending invoices.",
-  validate: async (runtime) => getKomunitasService(runtime).isDokuConfigured(),
+  validate: async () => true,
   handler: async (
     runtime,
     message,
@@ -237,7 +236,7 @@ export const runMonitoringLoopAction: Action = {
     try {
       const service = getKomunitasService(runtime);
       const result = await service.checkPendingPayments(
-        getStringOption(options, "communityId") ?? defaultCommunityId,
+        getStringOption(options, "communityId"),
       );
       const text = `Monitoring selesai. Dicek ${result.checked.length} invoice, ${result.paid.length} terdeteksi lunas, ${result.unchanged.length} masih pending.`;
       await sendCallback(callback, message, text, ["RUN_MONITORING_LOOP"]);
@@ -336,11 +335,12 @@ export const getUnpaidInvoicesAction: Action = {
     callback,
   ): Promise<ActionResult> => {
     const service = getKomunitasService(runtime);
-    const invoices = await service.listInvoices(defaultCommunityId, {
+    const community = await service.getCommunity();
+    const invoices = await service.listInvoices(community.id, {
       status: "pending",
       month: toMonth(),
     });
-    const memberList = await service.listMembers(defaultCommunityId);
+    const memberList = await service.listMembers(community.id);
     const members = new Map(memberList.map((m) => [m.id, m]));
     const total = invoices.reduce((sum, invoice) => sum + invoice.amount, 0);
     const rows = invoices.map(
@@ -647,7 +647,7 @@ export const detectPaymentAnomalyAction: Action = {
   ): Promise<ActionResult> => {
     const service = getKomunitasService(runtime);
     const result = await service.detectPaymentAnomaly(
-      getStringOption(options, "communityId") ?? defaultCommunityId,
+      getStringOption(options, "communityId"),
       getStringOption(options, "month") ?? toMonth(),
     );
     const rows = result.anomalies.map(
@@ -683,7 +683,7 @@ export const runBillingLoopAction: Action = {
   name: "RUN_BILLING_LOOP",
   similes: ["RUN_MONTHLY_BILLING_LOOP", "JALANKAN_LOOP_TAGIHAN"],
   description: "Runs the manual monthly billing loop for demo.",
-  validate: async (runtime) => getKomunitasService(runtime).isDokuConfigured(),
+  validate: async () => true,
   handler: async (
     runtime,
     message,
@@ -747,7 +747,7 @@ export const runReportLoopAction: Action = {
   ): Promise<ActionResult> => {
     const service = getKomunitasService(runtime);
     const report = await service.generateMonthlyReport(
-      getStringOption(options, "communityId") ?? defaultCommunityId,
+      getStringOption(options, "communityId"),
       getStringOption(options, "month") ?? toMonth(),
     );
     const text = `Report loop selesai. Terkumpul ${rupiah(report.totalCollected)}, pengeluaran ${rupiah(report.totalExpenses)}, collection rate ${report.collectionRate}.`;
@@ -836,6 +836,111 @@ export const calculateSplitBillAction: Action = {
   ],
 };
 
+// ── FULL_BILLING_WORKFLOW ───────────────────────────────────────────────
+
+export const fullBillingWorkflowAction: Action = {
+  name: "FULL_BILLING_WORKFLOW",
+  similes: [
+    "JALANKAN_WORKFLOW",
+    "FULL_WORKFLOW",
+    "AUTONOMOUS_BILLING",
+    "TAGIH_DAN_LAPORAN",
+  ],
+  description:
+    "Autonomous multi-step workflow: create invoices → check payments → send reminders → generate report.",
+  validate: async () => true,
+  handler: async (
+    runtime,
+    message,
+    _state,
+    _options,
+    callback,
+  ): Promise<ActionResult> => {
+    const service = getKomunitasService(runtime);
+    const steps: Record<string, unknown>[] = [];
+
+    let invoiceCount = 0;
+    let paidCount = 0;
+    let reminderCount = 0;
+    let collectionRate = "0%";
+
+    try {
+      const billing = await service.bulkCreateInvoices({});
+      invoiceCount = billing.created.length;
+      steps.push({
+        step: "billing",
+        created: invoiceCount,
+        skipped: billing.skipped.length,
+      });
+    } catch (e) {
+      steps.push({
+        step: "billing",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+
+    try {
+      const monitoring = await service.checkPendingPayments();
+      paidCount = monitoring.paid.length;
+      steps.push({
+        step: "monitoring",
+        paid: paidCount,
+        unchanged: monitoring.unchanged.length,
+      });
+    } catch (e) {
+      steps.push({
+        step: "monitoring",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+
+    try {
+      const reminders = await service.sendPaymentReminders({});
+      reminderCount = reminders.reminded.length;
+      steps.push({ step: "reminders", sent: reminderCount });
+    } catch (e) {
+      steps.push({
+        step: "reminders",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+
+    try {
+      const report = await service.generateMonthlyReport();
+      collectionRate = report.collectionRate;
+      steps.push({
+        step: "report",
+        collectionRate,
+        totalCollected: report.totalCollected,
+      });
+    } catch (e) {
+      steps.push({
+        step: "report",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+
+    const text = `Workflow selesai: ${invoiceCount} invoice dibuat, ${paidCount} sudah bayar, ${reminderCount} reminder dikirim. Collection rate: ${collectionRate}.`;
+    await sendCallback(callback, message, text, ["FULL_BILLING_WORKFLOW"]);
+    return { success: true, data: { steps } };
+  },
+  examples: [
+    [
+      {
+        name: "{{name1}}",
+        content: { text: "Jalankan workflow billing lengkap" },
+      },
+      {
+        name: "{{name2}}",
+        content: {
+          text: "Menjalankan workflow otonom: tagih → cek bayar → reminder → laporan.",
+          actions: ["FULL_BILLING_WORKFLOW"],
+        },
+      },
+    ],
+  ],
+};
+
 // ── Exported list ───────────────────────────────────────────────────────
 
 export const allActions: Action[] = [
@@ -856,4 +961,5 @@ export const allActions: Action[] = [
   runBillingLoopAction,
   runReportLoopAction,
   calculateSplitBillAction,
+  fullBillingWorkflowAction,
 ];

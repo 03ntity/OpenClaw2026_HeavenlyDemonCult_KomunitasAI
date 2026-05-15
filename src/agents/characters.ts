@@ -107,7 +107,7 @@ Aturan: Jawab Bahasa Indonesia yang hangat dan friendly 😊, pakai emoji secuku
       {
         name: "BendaharaRT",
         content: {
-          text: "Siap! 💳 Aku buatkan tagihan DOKU untuk semua warga aktif sekarang...",
+          text: "",
           actions: ["BULK_CREATE_INVOICES"],
         },
       },
@@ -117,7 +117,7 @@ Aturan: Jawab Bahasa Indonesia yang hangat dan friendly 😊, pakai emoji secuku
       {
         name: "BendaharaRT",
         content: {
-          text: "Aku cek dulu siapa yang masih punya tagihan pending bulan ini 🔍",
+          text: "",
           actions: ["GET_UNPAID_INVOICES"],
         },
       },
@@ -127,7 +127,7 @@ Aturan: Jawab Bahasa Indonesia yang hangat dan friendly 😊, pakai emoji secuku
       {
         name: "BendaharaRT",
         content: {
-          text: "Sebentar, aku cek saldo kas RT terkini 📊",
+          text: "",
           actions: ["GET_KAS_SUMMARY"],
         },
       },
@@ -206,7 +206,7 @@ Aturan: Jawab Bahasa Indonesia yang hangat dan akrab 😊, pakai emoji secukupny
       {
         name: "BendaharaArisan",
         content: {
-          text: "Oke, aku buatkan tagihan DOKU untuk semua peserta arisan aktif!",
+          text: "",
           actions: ["BULK_CREATE_INVOICES"],
         },
       },
@@ -219,7 +219,7 @@ Aturan: Jawab Bahasa Indonesia yang hangat dan akrab 😊, pakai emoji secukupny
       {
         name: "BendaharaArisan",
         content: {
-          text: "Aku cek siapa yang belum setor arisan bulan ini ya.",
+          text: "",
           actions: ["GET_UNPAID_INVOICES"],
         },
       },
@@ -296,7 +296,7 @@ Aturan: Jawab Bahasa Indonesia yang profesional tapi tetap friendly 😊, pakai 
       {
         name: "BendaharaKoperasi",
         content: {
-          text: "Baik, saya buatkan tagihan DOKU untuk simpanan wajib semua anggota aktif.",
+          text: "",
           actions: ["BULK_CREATE_INVOICES"],
         },
       },
@@ -306,7 +306,7 @@ Aturan: Jawab Bahasa Indonesia yang profesional tapi tetap friendly 😊, pakai 
       {
         name: "BendaharaKoperasi",
         content: {
-          text: "Saya cek posisi kas koperasi terkini.",
+          text: "",
           actions: ["GET_KAS_SUMMARY"],
         },
       },
@@ -383,7 +383,7 @@ Aturan: Jawab Bahasa Indonesia yang semangat dan friendly 😊, pakai emoji secu
       {
         name: "BendaharaEvent",
         content: {
-          text: "Oke, aku buatkan tagihan DOKU untuk semua peserta event.",
+          text: "",
           actions: ["BULK_CREATE_INVOICES"],
         },
       },
@@ -393,7 +393,7 @@ Aturan: Jawab Bahasa Indonesia yang semangat dan friendly 😊, pakai emoji secu
       {
         name: "BendaharaEvent",
         content: {
-          text: "Aku cek saldo dan pengeluaran event sejauh ini.",
+          text: "",
           actions: ["GET_KAS_SUMMARY"],
         },
       },
@@ -469,7 +469,7 @@ Aturan: Jawab Bahasa Indonesia yang santai dan friendly 😊, pakai emoji secuku
       {
         name: "BendaharaPatungan",
         content: {
-          text: "Aku hitung pembagian biaya untuk semua peserta.",
+          text: "",
           actions: ["CALCULATE_SPLIT_BILL"],
         },
       },
@@ -479,7 +479,7 @@ Aturan: Jawab Bahasa Indonesia yang santai dan friendly 😊, pakai emoji secuku
       {
         name: "BendaharaPatungan",
         content: {
-          text: "Oke, aku buatkan tagihan DOKU untuk semua peserta patungan!",
+          text: "",
           actions: ["BULK_CREATE_INVOICES"],
         },
       },
@@ -489,7 +489,7 @@ Aturan: Jawab Bahasa Indonesia yang santai dan friendly 😊, pakai emoji secuku
       {
         name: "BendaharaPatungan",
         content: {
-          text: "Aku cek siapa yang masih belum bayar bagiannya.",
+          text: "",
           actions: ["GET_UNPAID_INVOICES"],
         },
       },

@@ -1,7 +1,9 @@
 import { type IAgentRuntime, logger, Service } from "@elizaos/core";
+import { generateTextSafe } from "./helpers.ts";
 import { randomUUID } from "node:crypto";
 import * as db from "../database/db.ts";
 import { DokuMcpClient } from "./doku-mcp-client.ts";
+import { loadWahaConfig, WahaClient } from "./waha-client.ts";
 import {
   addDays,
   rowToCommunity,
@@ -31,6 +33,12 @@ export class KomunitasService extends Service {
 
   private readonly komunitasConfig: KomunitasConfig;
   private readonly doku: DokuMcpClient;
+  readonly wahaClient: WahaClient;
+  private readonly schedulerTimers = new Map<
+    string,
+    ReturnType<typeof setInterval>
+  >();
+  private readonly schedulerRunning = new Set<string>();
 
   constructor(
     runtime?: IAgentRuntime,
@@ -39,12 +47,14 @@ export class KomunitasService extends Service {
     super(runtime);
     this.komunitasConfig = config;
     this.doku = new DokuMcpClient(config);
+    this.wahaClient = new WahaClient(loadWahaConfig());
   }
 
   static async start(runtime: IAgentRuntime) {
     logger.info("Starting KomunitasAI service");
     const service = new KomunitasService(runtime, loadKomunitasConfig());
     await service.initDb();
+    await service.startAllSchedulers();
     return service;
   }
 
@@ -62,6 +72,116 @@ export class KomunitasService extends Service {
 
   async stop() {
     logger.info("Stopping KomunitasAI service");
+    for (const [communityId, timer] of this.schedulerTimers) {
+      clearInterval(timer);
+      this.schedulerTimers.delete(communityId);
+    }
+  }
+
+  async startAllSchedulers() {
+    try {
+      const schedules = await db.listActiveWorkflowSchedules();
+      for (const schedule of schedules) {
+        this.startSchedulerForCommunity(
+          schedule.community_id,
+          schedule.interval_ms,
+        );
+      }
+      logger.info({ count: schedules.length }, "Workflow schedulers started");
+    } catch (err) {
+      logger.warn({ err }, "Failed to load workflow schedules from DB");
+    }
+  }
+
+  startSchedulerForCommunity(communityId: string, intervalMs: number) {
+    if (this.schedulerTimers.has(communityId)) {
+      clearInterval(this.schedulerTimers.get(communityId)!);
+      this.schedulerTimers.delete(communityId);
+    }
+    const timer = setInterval(async () => {
+      if (this.schedulerRunning.has(communityId)) {
+        logger.warn(
+          { communityId },
+          "Scheduler skipped — previous run still in progress",
+        );
+        return;
+      }
+      this.schedulerRunning.add(communityId);
+      try {
+        logger.info({ communityId }, "Running scheduled workflow");
+        const result: Record<string, unknown> = {};
+        try {
+          result.billing = await this.bulkCreateInvoices({ communityId });
+        } catch (err) {
+          result.billingError =
+            err instanceof Error ? err.message : String(err);
+          logger.warn({ communityId, err }, "Scheduled billing step failed");
+        }
+        try {
+          result.monitoring = await this.checkPendingPayments(communityId);
+        } catch (err) {
+          result.monitoringError =
+            err instanceof Error ? err.message : String(err);
+          logger.warn(
+            { communityId, err },
+            "Scheduled payment monitoring step failed",
+          );
+        }
+        try {
+          result.reminders = await this.sendPaymentReminders({ communityId });
+        } catch (err) {
+          result.reminderError =
+            err instanceof Error ? err.message : String(err);
+          logger.warn({ communityId, err }, "Scheduled reminder step failed");
+        }
+        await db.updateNextRunAt(communityId);
+        await this.log(communityId, "scheduled_workflow_completed", result);
+      } catch (err) {
+        logger.warn({ communityId, err }, "Scheduled workflow failed");
+      } finally {
+        this.schedulerRunning.delete(communityId);
+      }
+    }, intervalMs);
+    this.schedulerTimers.set(communityId, timer);
+    logger.info({ communityId, intervalMs }, "Scheduler started for community");
+  }
+
+  async setWorkflowSchedule(
+    communityId: string,
+    intervalMs: number,
+    requester?: { phone?: string; channel?: string },
+  ): Promise<void> {
+    await db.upsertWorkflowSchedule({
+      communityId,
+      intervalMs,
+      isActive: true,
+      requesterPhone: requester?.phone,
+      requesterChannel: requester?.channel,
+    });
+    this.startSchedulerForCommunity(communityId, intervalMs);
+  }
+
+  async cancelWorkflowSchedule(communityId: string): Promise<void> {
+    await db.deactivateWorkflowSchedule(communityId);
+    if (this.schedulerTimers.has(communityId)) {
+      clearInterval(this.schedulerTimers.get(communityId)!);
+      this.schedulerTimers.delete(communityId);
+    }
+  }
+
+  getSchedulerStatus(communityId: string): boolean {
+    return this.schedulerTimers.has(communityId);
+  }
+
+  async rememberWorkflowRequester(
+    communityId: string,
+    requester?: { phone?: string; channel?: string },
+  ): Promise<void> {
+    if (!requester?.phone) return;
+    await this.log(communityId, "workflow_requester_registered", {
+      phone: requester.phone,
+      channel: requester.channel ?? "whatsapp",
+    });
   }
 
   isDokuConfigured() {
@@ -217,7 +337,7 @@ export class KomunitasService extends Service {
     const amount = params.amount ?? community.monthlyFee;
     const dueDays = params.dueDays ?? 7;
     const invoiceNumber = sanitizeInvoiceNumberLocal(
-      `KAI${period}${member.id}${Date.now()}`,
+      `KAI${period.replace("-", "")}${randomUUID().slice(0, 8)}`,
     );
     const description = `Iuran ${community.name} ${period}`;
 
@@ -230,7 +350,7 @@ export class KomunitasService extends Service {
         invoiceNumber,
         amount,
         description,
-        customerName: member.name,
+        customerName: String(member.name ?? "Customer"),
         customerPhone: member.phone,
         dueMinutes: dueDays * 24 * 60,
       });
@@ -269,11 +389,91 @@ export class KomunitasService extends Service {
     return { community, member, invoice, created: true };
   }
 
+  async createDirectPaymentForMember(params: {
+    communityId?: string;
+    memberId?: string;
+    period?: string;
+    amount?: number;
+    dueDays?: number;
+    method: "qris" | "va";
+    bank?: string;
+  }) {
+    const community = await this.getCommunity(params.communityId);
+    const members = await this.listMembers(community.id, true);
+    let member: Member | undefined;
+    if (params.memberId) {
+      const row = await db.findMember(params.memberId);
+      if (row) member = rowToMember(row);
+    }
+    member ??= members[0];
+    if (!member) throw new Error("Tidak ada anggota aktif untuk ditagih.");
+    if (member.communityId !== community.id) {
+      throw new Error("Anggota tidak termasuk komunitas aktif.");
+    }
+
+    const period = params.period ?? toMonth();
+    const amount = params.amount ?? community.monthlyFee;
+    const dueDays = params.dueDays ?? 7;
+    const invoiceNumber = sanitizeInvoiceNumberLocal(
+      `KAI${period.replace("-", "")}${params.method.toUpperCase()}${randomUUID().slice(0, 6)}`,
+    );
+    const description =
+      params.method === "qris"
+        ? `QRIS ${community.name} ${period}`
+        : `VA ${params.bank?.toUpperCase() ?? "BANK"} ${community.name} ${period}`;
+
+    const payment =
+      params.method === "qris"
+        ? await this.doku.createQrisPayment({
+            invoiceNumber,
+            amount,
+            customerName: String(member.name ?? "Customer"),
+          })
+        : await this.doku.createVirtualAccount({
+            invoiceNumber,
+            amount,
+            customerName: String(member.name ?? "Customer"),
+            customerEmail: member.email,
+            bank: params.bank ?? "BCA",
+          });
+
+    const instruction =
+      payment.paymentUrl ??
+      payment.paymentCode ??
+      payment.qrString ??
+      payment.paymentInstruction;
+
+    const invoiceRow = await db.createInvoice({
+      id: randomUUID(),
+      communityId: community.id,
+      memberId: member.id,
+      amount,
+      description,
+      period,
+      dueDate: addDays(new Date(), dueDays).toISOString().slice(0, 10),
+      paymentLink: instruction,
+      dokuInvoiceId: payment.invoiceNumber,
+      dokuRequestId: payment.requestId,
+    });
+    const invoice = rowToInvoice(invoiceRow);
+    await this.log(community.id, "direct_payment_created", {
+      invoiceId: invoice.id,
+      memberId: member.id,
+      method: params.method,
+      bank: params.bank,
+      amount,
+      dokuInvoiceId: payment.invoiceNumber,
+    });
+
+    return { community, member, invoice, payment, method: params.method };
+  }
+
   async bulkCreateInvoices(params: {
     communityId?: string;
     period?: string;
     amount?: number;
     dueDays?: number;
+    runtime?: IAgentRuntime;
   }) {
     const community = await this.getCommunity(params.communityId);
     const period = params.period ?? toMonth();
@@ -281,20 +481,87 @@ export class KomunitasService extends Service {
     const members = await this.listMembers(community.id, true);
     const created: Invoice[] = [];
     const skipped: Member[] = [];
+    const errors: Array<{ member: Member; error: string }> = [];
+    let waSent = 0;
+    let waSkippedDuplicate = 0;
+    let waFailed = 0;
+
+    let waTemplate: string | null = null;
+    if (params.runtime && this.wahaClient.isConfigured) {
+      try {
+        waTemplate =
+          (await generateTextSafe(
+            params.runtime,
+            `Kamu adalah bendahara digital komunitas "${community.name}" (tipe: ${community.type}).
+Buat pesan WhatsApp singkat dan natural untuk memberitahu anggota bahwa tagihan mereka sudah dibuat.
+Pesan harus:
+- Sesuai konteks komunitas (RT/arisan/koperasi/event/patungan)
+- Menyebut nama anggota sebagai {{nama}}
+- Menyebut nominal sebagai {{nominal}}
+- Menyebut periode sebagai {{periode}}
+- Menyebut link pembayaran sebagai {{link}}
+- Singkat, ramah, natural seperti pesan WhatsApp asli
+- Boleh pakai emoji secukupnya
+Jawab HANYA dengan teks pesan, tanpa penjelasan.`,
+          )) || null;
+      } catch {
+        waTemplate = null;
+      }
+    }
 
     for (const member of members) {
-      const result = await this.createPaymentLinkForMember({
-        communityId: community.id,
-        memberId: member.id,
-        period,
-        amount,
-        dueDays: params.dueDays ?? 7,
-      });
-      if (!result.created) {
-        skipped.push(member);
-        continue;
+      try {
+        const result = await this.createPaymentLinkForMember({
+          communityId: community.id,
+          memberId: member.id,
+          period,
+          amount,
+          dueDays: params.dueDays ?? 7,
+        });
+        if (!result.created) {
+          skipped.push(member);
+          continue;
+        }
+        created.push(result.invoice);
+
+        if (this.wahaClient.isConfigured && member.phone) {
+          const inv = result.invoice;
+          const waMsg = waTemplate
+            ? waTemplate
+                .replace(/\{\{nama\}\}/g, member.name)
+                .replace(/\{\{nominal\}\}/g, rupiah(amount))
+                .replace(/\{\{periode\}\}/g, period)
+                .replace(/\{\{link\}\}/g, inv.paymentLink || "-")
+            : `Halo ${member.name}! 👋\n\nTagihan ${community.name} bulan ${period} sebesar ${rupiah(amount)} telah dibuat.\n\n💳 ${inv.paymentLink || "-"}\n\nTerima kasih 🙏`;
+          const delivery = await this.sendWhatsAppOnce({
+            communityId: community.id,
+            notificationKey: `invoice-created:${community.id}:${member.id}:${period}:${amount}`,
+            phone: member.phone,
+            text: waMsg,
+            logAction: "invoice_notification_sent",
+            logDetails: {
+              invoiceId: inv.id,
+              memberId: member.id,
+              period,
+              channel: "whatsapp",
+            },
+            failureLogAction: "invoice_notification_failed",
+            failureLogDetails: {
+              invoiceId: inv.id,
+              memberId: member.id,
+              period,
+            },
+          });
+          if (delivery === "sent") waSent += 1;
+          if (delivery === "skipped") waSkippedDuplicate += 1;
+          if (delivery === "failed") waFailed += 1;
+        }
+      } catch (error) {
+        errors.push({
+          member,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-      created.push(result.invoice);
     }
 
     await this.log(community.id, "bulk_invoice_created", {
@@ -302,9 +569,13 @@ export class KomunitasService extends Service {
       amount,
       createdCount: created.length,
       skippedCount: skipped.length,
+      errorCount: errors.length,
+      waSent,
+      waSkippedDuplicate,
+      waFailed,
     });
 
-    return { community, period, created, skipped };
+    return { community, period, created, skipped, errors };
   }
 
   async checkPendingPayments(communityId?: string) {
@@ -314,11 +585,25 @@ export class KomunitasService extends Service {
     const unchanged: Invoice[] = [];
 
     for (const invoice of pending) {
-      const status = await this.doku.checkPaymentStatus(invoice.dokuInvoiceId);
-      const normalized = String(status.status).toUpperCase();
-      if (normalized === "SUCCESS" || normalized === "PAID") {
-        paid.push(await this.markInvoicePaid(invoice.id, status.paidAt));
-      } else {
+      try {
+        const status = await this.doku.checkPaymentStatus(
+          invoice.dokuInvoiceId,
+        );
+        const normalized = String(status.status).toUpperCase();
+        if (normalized === "SUCCESS" || normalized === "PAID") {
+          paid.push(await this.markInvoicePaid(invoice.id, status.paidAt));
+        } else {
+          unchanged.push(invoice);
+        }
+      } catch (error) {
+        logger.warn(
+          {
+            invoiceId: invoice.id,
+            dokuInvoiceId: invoice.dokuInvoiceId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "DOKU payment status check failed, continuing with next invoice",
+        );
         unchanged.push(invoice);
       }
     }
@@ -360,12 +645,13 @@ export class KomunitasService extends Service {
   ): Promise<Invoice> {
     const invoice = await this.getInvoice(invoiceId);
     if (invoice.status === "paid") return invoice;
-
-    await db.updateInvoiceStatus(invoiceId, "paid", paidAt);
+    const community = await this.getCommunity(invoice.communityId);
+    const memberRow = await db.findMember(invoice.memberId);
+    const member = memberRow ? rowToMember(memberRow) : undefined;
 
     const existingEntry = await db.findKasEntryByReference(invoiceId);
     if (!existingEntry) {
-      await db.createKasEntry({
+      await db.markInvoicePaidAtomic(invoiceId, paidAt, {
         id: randomUUID(),
         communityId: invoice.communityId,
         type: "income",
@@ -376,15 +662,95 @@ export class KomunitasService extends Service {
         recordedBy: "agent",
         date: paidAt.slice(0, 10),
       });
+    } else {
+      await db.updateInvoiceStatus(invoiceId, "paid", paidAt);
     }
 
     await this.log(invoice.communityId, "invoice_paid", {
       invoiceId: invoice.id,
       memberId: invoice.memberId,
       amount: invoice.amount,
+      memberName: member?.name,
     });
 
-    return { ...invoice, status: "paid", paidAt };
+    const paidInvoice = { ...invoice, status: "paid" as const, paidAt };
+    await this.notifyInvoicePaid(community, member, paidInvoice);
+    return paidInvoice;
+  }
+
+  private async notifyInvoicePaid(
+    community: Community,
+    member: Member | undefined,
+    invoice: Invoice,
+  ): Promise<void> {
+    if (!this.wahaClient.isConfigured) return;
+    const adminPhones = await this.getPaymentObserverPhones(community.id);
+    const memberMessage = [
+      `✅ Pembayaran diterima`,
+      ``,
+      `Halo ${member?.name ?? "Member"}, pembayaran tagihan ${community.name} sudah tercatat lunas.`,
+      `Nominal: ${rupiah(invoice.amount)}`,
+      `Invoice: ${invoice.dokuInvoiceId}`,
+      `Dibayar pada: ${new Date(invoice.paidAt ?? new Date()).toLocaleString("id-ID")}`,
+      ``,
+      `Terima kasih 🙏`,
+    ].join("\n");
+
+    if (member?.phone) {
+      await this.sendWhatsAppOnce({
+        communityId: community.id,
+        notificationKey: `payment-confirmation:${invoice.id}:member:${member.id}`,
+        phone: member.phone,
+        text: memberMessage,
+        logAction: "payment_confirmation_sent",
+        logDetails: {
+          invoiceId: invoice.id,
+          memberId: member.id,
+          recipient: "member",
+          channel: "whatsapp",
+        },
+        failureLogAction: "payment_confirmation_failed",
+        failureLogDetails: {
+          invoiceId: invoice.id,
+          memberId: member.id,
+          recipient: "member",
+        },
+      });
+    }
+
+    const adminMessage = [
+      `✅ Pembayaran sukses`,
+      ``,
+      `${member?.name ?? "Member"} sudah membayar tagihan ${community.name}.`,
+      `Nominal: ${rupiah(invoice.amount)}`,
+      `Periode: ${invoice.period}`,
+      `Invoice: ${invoice.dokuInvoiceId}`,
+      `Dibayar pada: ${new Date(invoice.paidAt ?? new Date()).toLocaleString("id-ID")}`,
+    ].join("\n");
+
+    for (const adminPhone of adminPhones) {
+      await this.sendWhatsAppOnce({
+        communityId: community.id,
+        notificationKey: `payment-confirmation:${invoice.id}:admin:${adminPhone}`,
+        phone: adminPhone,
+        text: adminMessage,
+        logAction: "payment_admin_notification_sent",
+        logDetails: {
+          invoiceId: invoice.id,
+          memberId: member?.id,
+          recipient: "admin",
+          adminPhone,
+          channel: "whatsapp",
+        },
+        failureLogAction: "payment_admin_notification_failed",
+        failureLogDetails: {
+          invoiceId: invoice.id,
+          memberId: member?.id,
+          recipient: "admin",
+          adminPhone,
+        },
+      });
+    }
   }
 
   async simulatePayment(params: { invoiceId?: string; communityId?: string }) {
@@ -435,19 +801,76 @@ export class KomunitasService extends Service {
     period?: string;
   }) {
     const community = await this.getCommunity(params.communityId);
+    const demoMode = process.env.WORKFLOW_DEMO_MODE === "true";
     const unpaid = await this.listInvoices(community.id, {
       status: "pending",
       month: params.period ?? toMonth(),
     });
-    const reminded = unpaid.filter((invoice) => invoice.reminderCount < 3);
+    const reminded = demoMode
+      ? unpaid
+      : unpaid.filter((invoice) => invoice.reminderCount < 3);
+    const members = new Map(
+      (await this.listMembers(community.id, false)).map((member) => [
+        member.id,
+        member,
+      ]),
+    );
+    let waSent = 0;
+    let waFailed = 0;
+    let waSkippedDuplicate = 0;
+
     for (const invoice of reminded) {
-      await db.incrementReminderCount(invoice.id);
+      const member = members.get(invoice.memberId);
+      if (!this.wahaClient.isConfigured || !member?.phone) {
+        await db.incrementReminderCount(invoice.id);
+        continue;
+      }
+
+      const message = `Halo ${member.name}! 👋 Reminder iuran ${community.name} bulan ${invoice.period} sebesar ${rupiah(invoice.amount)} belum dibayar. Link pembayaran: ${invoice.paymentLink}. Terima kasih 🙏`;
+      const delivery = await this.sendWhatsAppOnce({
+        communityId: community.id,
+        notificationKey: `reminder:${community.id}:${invoice.id}:${invoice.reminderCount + 1}`,
+        phone: member.phone,
+        text: message,
+        logAction: "reminder_notification_sent",
+        logDetails: {
+          invoiceId: invoice.id,
+          memberId: member.id,
+          reminderNumber: invoice.reminderCount + 1,
+          channel: "whatsapp",
+        },
+        failureLogAction: "reminder_notification_failed",
+        failureLogDetails: {
+          invoiceId: invoice.id,
+          memberId: member.id,
+          reminderNumber: invoice.reminderCount + 1,
+        },
+      });
+      if (delivery === "sent") {
+        await db.incrementReminderCount(invoice.id);
+        waSent += 1;
+      } else if (delivery === "failed") {
+        waFailed += 1;
+      } else {
+        waSkippedDuplicate += 1;
+      }
     }
     await this.log(community.id, "reminder_sent", {
       period: params.period ?? toMonth(),
       reminderCount: reminded.length,
+      waSent,
+      waFailed,
+      waSkippedDuplicate,
+      demoMode,
     });
-    return { community, reminded, skipped: unpaid.length - reminded.length };
+    return {
+      community,
+      reminded,
+      skipped: unpaid.length - reminded.length,
+      waSent,
+      waFailed,
+      waSkippedDuplicate,
+    };
   }
 
   async generateMonthlyReport(
@@ -571,6 +994,96 @@ export class KomunitasService extends Service {
       details,
     });
   }
+
+  private async sendWhatsAppOnce(params: {
+    communityId: string;
+    notificationKey: string;
+    phone: string;
+    text: string;
+    logAction?: string;
+    logDetails?: Record<string, unknown>;
+    failureLogAction?: string;
+    failureLogDetails?: Record<string, unknown>;
+  }): Promise<"sent" | "skipped" | "failed"> {
+    const claimed = await db.claimNotificationDelivery({
+      id: randomUUID(),
+      communityId: params.communityId,
+      notificationKey: params.notificationKey,
+      channel: "whatsapp",
+    });
+
+    if (!claimed) {
+      logger.info(
+        { notificationKey: params.notificationKey },
+        "WhatsApp notification skipped because it was already claimed",
+      );
+      return "skipped";
+    }
+
+    try {
+      await this.wahaClient.sendText(params.phone, params.text);
+      await db.updateNotificationDeliveryStatus(params.notificationKey, "sent");
+      if (params.logAction) {
+        await this.log(params.communityId, params.logAction, {
+          ...(params.logDetails ?? {}),
+          notificationKey: params.notificationKey,
+        });
+      }
+      return "sent";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await db.updateNotificationDeliveryStatus(
+        params.notificationKey,
+        "failed",
+        message,
+      );
+      logger.warn(
+        { notificationKey: params.notificationKey, error: message },
+        "WAHA notification delivery failed",
+      );
+      if (params.failureLogAction) {
+        await this.log(params.communityId, params.failureLogAction, {
+          ...(params.failureLogDetails ?? {}),
+          notificationKey: params.notificationKey,
+          error: message,
+        });
+      }
+      return "failed";
+    }
+  }
+
+  private async getPaymentObserverPhones(communityId: string) {
+    const phones = new Set(getAdminWhatsAppPhones());
+    try {
+      const schedule = await db.getWorkflowSchedule(communityId);
+      if (schedule?.requester_phone) phones.add(schedule.requester_phone);
+    } catch (error) {
+      logger.warn(
+        {
+          communityId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to load workflow requester notification target",
+      );
+    }
+    try {
+      const logs = await db.findLogs(communityId);
+      for (const log of logs) {
+        if (log.action !== "workflow_requester_registered") continue;
+        const phone = log.details?.phone;
+        if (typeof phone === "string" && phone.trim()) phones.add(phone.trim());
+      }
+    } catch (error) {
+      logger.warn(
+        {
+          communityId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to load workflow requester logs",
+      );
+    }
+    return [...phones];
+  }
 }
 
 export const getKomunitasService = (runtime: IAgentRuntime) => {
@@ -584,3 +1097,12 @@ export const getKomunitasService = (runtime: IAgentRuntime) => {
 // Local copy of sanitizeInvoiceNumber to avoid circular deps
 const sanitizeInvoiceNumberLocal = (value: string) =>
   value.replace(/[^A-Za-z0-9]/g, "").slice(0, 30);
+
+const getAdminWhatsAppPhones = () =>
+  (process.env.KOMUNITAS_ADMIN_WHATSAPP ||
+    process.env.KOMUNITAS_ADMIN_WHATSAPP_NUMBERS ||
+    process.env.ADMIN_WHATSAPP_PHONE ||
+    "")
+    .split(",")
+    .map((phone) => phone.trim())
+    .filter(Boolean);

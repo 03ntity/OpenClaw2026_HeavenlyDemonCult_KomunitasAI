@@ -187,3 +187,25 @@ export const routeJson = (res: RouteResponse, body: unknown, status = 200) => {
     return (res as any).status(status).json(body);
   return res.json(body);
 };
+
+export async function generateTextSafe(
+  runtime: IAgentRuntime,
+  context: string,
+): Promise<string> {
+  const generateText = (runtime as any).generateText;
+  if (typeof generateText !== "function") return "";
+
+  let raw: unknown;
+  try {
+    raw = await generateText.call(runtime, context);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("trim is not a function")) throw error;
+    raw = await generateText.call(runtime, { context });
+  }
+
+  if (raw && typeof raw === "object" && "text" in raw) {
+    return String((raw as any).text ?? "");
+  }
+  return String(raw ?? "");
+}

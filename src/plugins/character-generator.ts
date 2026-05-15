@@ -1,4 +1,5 @@
-import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Character } from "@elizaos/core";
@@ -170,15 +171,15 @@ export function generateCharacter(params: {
   };
 }
 
-export function saveCharacterFile(
+export async function saveCharacterFile(
   communityId: string,
   character: Character,
-): string {
+): Promise<string> {
   if (!existsSync(CHARACTERS_DIR)) {
-    mkdirSync(CHARACTERS_DIR, { recursive: true });
+    await mkdir(CHARACTERS_DIR, { recursive: true });
   }
   const filePath = join(CHARACTERS_DIR, `${communityId}.json`);
-  writeFileSync(filePath, JSON.stringify(character, null, 2), "utf-8");
+  await writeFile(filePath, JSON.stringify(character, null, 2), "utf-8");
   return filePath;
 }
 

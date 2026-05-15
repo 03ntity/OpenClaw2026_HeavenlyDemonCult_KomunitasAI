@@ -282,46 +282,42 @@ export function parseBatchFormInput(
   name?: string;
   description?: string;
   monthlyFee?: number;
-  members: Array<{ name: string; phone?: string }>;
+  memberLines: string[];
 } {
   const result: {
     name?: string;
     description?: string;
     monthlyFee?: number;
-    members: Array<{ name: string; phone?: string }>;
-  } = { members: [] };
+    memberLines: string[];
+  } = { memberLines: [] };
 
   for (const line of input.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    const memberMatch = trimmed.match(/^\d+[\.)]\s*(.+)$/);
+    const memberMatch = trimmed.match(/^\d+[.)]\s*(.+)$/);
     if (memberMatch?.[1]) {
-      const [rawName, rawPhone] = memberMatch[1].split(/\s+-\s+/, 2);
-      const name = rawName.trim();
-      if (name && !name.includes("[")) {
-        const phone = normalizePhone(rawPhone);
-        result.members.push(phone ? { name, phone } : { name });
-      }
+      const raw = memberMatch[1].trim();
+      if (raw && !raw.includes("[")) result.memberLines.push(raw);
       continue;
     }
 
     if (!trimmed.includes(":")) continue;
 
-    const [rawKey, ...valueParts] = trimmed.split(":");
-    const key = rawKey.toLowerCase().trim();
-    const value = valueParts.join(":").trim();
-    if (!value || value.includes("[contoh:")) continue;
+    const colonIdx = trimmed.indexOf(":");
+    const rawKey = trimmed.slice(0, colonIdx).toLowerCase().trim();
+    const value = trimmed.slice(colonIdx + 1).trim();
+    if (!value || value.includes("[contoh:") || value.startsWith("[")) continue;
 
-    if (key.includes("nama")) {
+    if (rawKey.includes("nama")) {
       result.name = value;
       continue;
     }
 
     if (
-      key.includes("nominal") ||
-      key.includes("iuran") ||
-      key.includes("kontribusi")
+      rawKey.includes("nominal") ||
+      rawKey.includes("iuran") ||
+      rawKey.includes("kontribusi")
     ) {
       const amount = parseMoneyInput(value);
       if (amount) result.monthlyFee = amount;
@@ -329,12 +325,12 @@ export function parseBatchFormInput(
     }
 
     if (
-      key.includes("jadwal") ||
-      key.includes("jenis") ||
-      key.includes("tanggal") ||
-      key.includes("kelurahan") ||
-      key.includes("kecamatan") ||
-      key.includes("deskripsi")
+      rawKey.includes("jadwal") ||
+      rawKey.includes("jenis") ||
+      rawKey.includes("tanggal") ||
+      rawKey.includes("kelurahan") ||
+      rawKey.includes("kecamatan") ||
+      rawKey.includes("deskripsi")
     ) {
       result.description = value;
     }

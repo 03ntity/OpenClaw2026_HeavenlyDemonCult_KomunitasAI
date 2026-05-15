@@ -154,6 +154,17 @@ CREATE TABLE IF NOT EXISTS agent_logs (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+  id               TEXT PRIMARY KEY,
+  community_id     TEXT NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+  notification_key TEXT NOT NULL UNIQUE,
+  channel          TEXT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'sending',
+  error            TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS onboarding_state (
   agent_id    TEXT NOT NULL,
   state       JSONB NOT NULL DEFAULT '{}',
@@ -161,12 +172,33 @@ CREATE TABLE IF NOT EXISTS onboarding_state (
   PRIMARY KEY (agent_id)
 );
 
+CREATE TABLE IF NOT EXISTS workflow_schedules (
+  id              TEXT PRIMARY KEY,
+  community_id    TEXT NOT NULL UNIQUE REFERENCES communities(id) ON DELETE CASCADE,
+  workflow_type   TEXT NOT NULL DEFAULT 'full_billing',
+  interval_ms     BIGINT NOT NULL,
+  is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+  requester_phone TEXT,
+  requester_channel TEXT,
+  next_run_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE workflow_schedules
+  ADD COLUMN IF NOT EXISTS requester_phone TEXT;
+
+ALTER TABLE workflow_schedules
+  ADD COLUMN IF NOT EXISTS requester_channel TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_members_community ON members(community_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_community ON invoices(community_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_period ON invoices(community_id, period);
 CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(community_id, status);
 CREATE INDEX IF NOT EXISTS idx_kas_community ON kas_entries(community_id);
 CREATE INDEX IF NOT EXISTS idx_agent_logs_community ON agent_logs(community_id);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_community
+  ON notification_deliveries(community_id);
 `;
 
 export async function initSchema(): Promise<void> {
@@ -229,7 +261,10 @@ const mapKasEntry = (r: QueryResultRow): KasEntryRow => ({
   description: r.description,
   reference_id: r.reference_id,
   recorded_by: r.recorded_by,
-  date: r.date,
+  date:
+    typeof r.date === "string"
+      ? r.date
+      : (r.date as Date).toISOString().slice(0, 10),
   created_at: iso(r.created_at),
 });
 
@@ -396,6 +431,52 @@ export async function updateInvoiceStatus(
   }
 }
 
+export async function markInvoicePaidAtomic(
+  invoiceId: string,
+  paidAt: string,
+  kasData: {
+    id: string;
+    communityId: string;
+    type: KasEntryType;
+    amount: number;
+    category: string;
+    description: string;
+    referenceId: string;
+    recordedBy?: "agent" | "admin";
+    date: string;
+  },
+): Promise<void> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "UPDATE invoices SET status = $1, paid_at = $2 WHERE id = $3",
+      ["paid", paidAt, invoiceId],
+    );
+    await client.query(
+      `INSERT INTO kas_entries (id, community_id, type, amount, category, description, reference_id, recorded_by, date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        kasData.id,
+        kasData.communityId,
+        kasData.type,
+        kasData.amount,
+        kasData.category,
+        kasData.description,
+        kasData.referenceId,
+        kasData.recordedBy ?? "agent",
+        kasData.date,
+      ],
+    );
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 export async function incrementReminderCount(id: string): Promise<void> {
   await getPool().query(
     "UPDATE invoices SET reminder_count = reminder_count + 1 WHERE id = $1",
@@ -506,6 +587,35 @@ export async function createLog(data: {
     [data.id, data.communityId, data.action, JSON.stringify(data.details)],
   );
   return mapAgentLog(rows[0]);
+}
+
+export async function claimNotificationDelivery(data: {
+  id: string;
+  communityId: string;
+  notificationKey: string;
+  channel: string;
+}): Promise<boolean> {
+  const { rowCount } = await getPool().query(
+    `INSERT INTO notification_deliveries
+       (id, community_id, notification_key, channel, status)
+     VALUES ($1,$2,$3,$4,'sending')
+     ON CONFLICT (notification_key) DO NOTHING`,
+    [data.id, data.communityId, data.notificationKey, data.channel],
+  );
+  return rowCount === 1;
+}
+
+export async function updateNotificationDeliveryStatus(
+  notificationKey: string,
+  status: "sent" | "failed",
+  error?: string,
+): Promise<void> {
+  await getPool().query(
+    `UPDATE notification_deliveries
+     SET status = $1, error = $2, updated_at = NOW()
+     WHERE notification_key = $3`,
+    [status, error ?? null, notificationKey],
+  );
 }
 
 export async function resetCommunityData(communityId: string): Promise<void> {
@@ -740,4 +850,102 @@ export async function upsertMember(data: {
     ],
   );
   return mapMember(rows[0]);
+}
+
+export interface WorkflowScheduleRow {
+  id: string;
+  community_id: string;
+  workflow_type: string;
+  interval_ms: number;
+  is_active: boolean;
+  requester_phone: string | null;
+  requester_channel: string | null;
+  next_run_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+const mapSchedule = (r: QueryResultRow): WorkflowScheduleRow => ({
+  id: r.id,
+  community_id: r.community_id,
+  workflow_type: r.workflow_type,
+  interval_ms: Number(r.interval_ms),
+  is_active: r.is_active,
+  requester_phone: r.requester_phone ?? null,
+  requester_channel: r.requester_channel ?? null,
+  next_run_at: iso(r.next_run_at),
+  created_at: iso(r.created_at),
+  updated_at: iso(r.updated_at),
+});
+
+export async function upsertWorkflowSchedule(data: {
+  communityId: string;
+  workflowType?: string;
+  intervalMs: number;
+  isActive?: boolean;
+  requesterPhone?: string;
+  requesterChannel?: string;
+}): Promise<WorkflowScheduleRow> {
+  const { rows } = await getPool().query(
+    `INSERT INTO workflow_schedules
+       (id, community_id, workflow_type, interval_ms, is_active,
+        requester_phone, requester_channel, next_run_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+     ON CONFLICT (community_id) DO UPDATE SET
+       workflow_type      = EXCLUDED.workflow_type,
+       interval_ms        = EXCLUDED.interval_ms,
+       is_active          = EXCLUDED.is_active,
+       requester_phone    = COALESCE(EXCLUDED.requester_phone, workflow_schedules.requester_phone),
+       requester_channel  = COALESCE(EXCLUDED.requester_channel, workflow_schedules.requester_channel),
+       next_run_at        = NOW(),
+       updated_at         = NOW()
+     RETURNING *`,
+    [
+      randomUUID(),
+      data.communityId,
+      data.workflowType ?? "full_billing",
+      data.intervalMs,
+      data.isActive ?? true,
+      data.requesterPhone ?? null,
+      data.requesterChannel ?? null,
+    ],
+  );
+  return mapSchedule(rows[0]);
+}
+
+export async function getWorkflowSchedule(
+  communityId: string,
+): Promise<WorkflowScheduleRow | null> {
+  const { rows } = await getPool().query(
+    `SELECT * FROM workflow_schedules WHERE community_id = $1`,
+    [communityId],
+  );
+  return rows[0] ? mapSchedule(rows[0]) : null;
+}
+
+export async function listActiveWorkflowSchedules(): Promise<
+  WorkflowScheduleRow[]
+> {
+  const { rows } = await getPool().query(
+    `SELECT * FROM workflow_schedules WHERE is_active = TRUE`,
+  );
+  return rows.map(mapSchedule);
+}
+
+export async function deactivateWorkflowSchedule(
+  communityId: string,
+): Promise<void> {
+  await getPool().query(
+    `UPDATE workflow_schedules SET is_active = FALSE, updated_at = NOW() WHERE community_id = $1`,
+    [communityId],
+  );
+}
+
+export async function updateNextRunAt(communityId: string): Promise<void> {
+  await getPool().query(
+    `UPDATE workflow_schedules
+     SET next_run_at = NOW() + (interval_ms || ' milliseconds')::interval, updated_at = NOW()
+     WHERE community_id = $1`,
+    [communityId],
+  );
 }

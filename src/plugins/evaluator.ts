@@ -1,4 +1,5 @@
 import { logger, type Evaluator, type IAgentRuntime } from "@elizaos/core";
+import { generateTextSafe } from "./helpers.ts";
 
 const FINANCE_KEYWORDS = [
   "payment",
@@ -27,11 +28,12 @@ export const komunitasEvaluator: Evaluator = {
     const text = message.content.text?.trim();
     if (!text) return;
     try {
-      const result = await (runtime as any).generateText({
-        context: `Extract key community finance facts from this message in Indonesian bullet points. Message: "${text}"`,
-      });
+      const resultText = await generateTextSafe(
+        runtime,
+        `Extract key community finance facts from this message in Indonesian bullet points. Message: "${text}"`,
+      );
       logger.info(
-        { evaluator: "KOMUNITAS_FINANCE_EVALUATOR", facts: result },
+        { evaluator: "KOMUNITAS_FINANCE_EVALUATOR", facts: resultText },
         "KomunitasAI finance facts extracted",
       );
     } catch {}

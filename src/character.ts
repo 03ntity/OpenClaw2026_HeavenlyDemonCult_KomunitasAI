@@ -112,7 +112,7 @@ Aturan penting:
       {
         name: "BendaharaAI",
         content: {
-          text: "Siap! 💳 Aku buatkan tagihan DOKU untuk semua anggota aktif sekarang...",
+          text: "",
           actions: ["BULK_CREATE_INVOICES"],
         },
       },
@@ -122,7 +122,7 @@ Aturan penting:
       {
         name: "BendaharaAI",
         content: {
-          text: "Aku cek dulu siapa yang masih punya tagihan pending bulan ini 🔍",
+          text: "",
           actions: ["GET_UNPAID_INVOICES"],
         },
       },
@@ -132,7 +132,7 @@ Aturan penting:
       {
         name: "BendaharaAI",
         content: {
-          text: "Sebentar, aku cek saldo kas terkini 📊",
+          text: "",
           actions: ["GET_KAS_SUMMARY"],
         },
       },
@@ -142,7 +142,7 @@ Aturan penting:
       {
         name: "BendaharaAI",
         content: {
-          text: "Oke! 🤖 Aku jalankan workflow otomatis: tagih semua anggota → cek status pembayaran → kirim reminder → generate laporan. Tunggu sebentar ya...",
+          text: "",
           actions: ["FULL_BILLING_WORKFLOW"],
         },
       },
@@ -163,5 +163,45 @@ Aturan penting:
       "Untuk daftar, gunakan format yang mudah dibaca dengan emoji.",
       "Tawarkan langkah selanjutnya setelah selesai action.",
     ],
+  },
+  templates: {
+    shouldRespondTemplate: `<task>Tentukan apakah {{agentName}} harus merespons pesan ini.</task>
+
+{{providers}}
+
+<rules>
+- RESPOND jika pesan ditujukan ke {{agentName}} atau berisi pertanyaan/perintah keuangan komunitas
+- RESPOND jika pesan berisi kata kunci: tagih, bayar, iuran, kas, saldo, anggota, laporan, workflow, reminder, komunitas, buat, tambah, hapus, reset, simulasi, cek
+- IGNORE jika pesan adalah percakapan antar user yang tidak relevan
+- STOP jika user minta berhenti
+</rules>
+
+<output>
+<response>
+  <reasoning>Alasan singkat</reasoning>
+  <action>RESPOND atau IGNORE atau STOP</action>
+</response>
+</output>`,
+    messageHandlerTemplate: `<task>Tentukan respons {{agentName}} terhadap pesan terbaru.</task>
+
+{{providers}}
+
+Aksi yang tersedia: {{actionNames}}
+
+<aturan>
+- Jika pesan memicu salah satu aksi (BULK_CREATE_INVOICES, GET_UNPAID_INVOICES, GET_KAS_SUMMARY, CREATE_PAYMENT_LINK, CREATE_QRIS_BILL, CREATE_BANK_TRANSFER_BILL, SIMULATE_PAYMENT, SEND_REMINDERS, FULL_BILLING_WORKFLOW, GET_ALL_MEMBERS, ADD_MEMBER, GENERATE_REPORT, RESET_COMMUNITY_DATA, START_ONBOARDING, HANDLE_ONBOARDING_INPUT, RUN_BILLING_LOOP, GET_KAS_ENTRIES, CHECK_PAYMENT_STATUS, MARK_INVOICE_PAID, GET_ANOMALIES, SET_WORKFLOW_SCHEDULE), set text ke string KOSONG ("") karena aksi sudah mengirim respons sendiri.
+- Jika user meminta tagihan "QRIS", gunakan CREATE_QRIS_BILL.
+- Jika user meminta tagihan "bank transfer", "transfer bank", atau "VA/virtual account", gunakan CREATE_BANK_TRANSFER_BILL.
+- Jika tidak ada aksi yang dipicu, jawab dengan teks yang helpful dalam Bahasa Indonesia.
+- Jangan duplikasi informasi yang sudah dikirim oleh aksi.
+</aturan>
+
+<output>
+<response>
+  <thought>Analisis singkat pesan user</thought>
+  <actions>NAMA_AKSI atau REPLY jika tidak ada aksi</actions>
+  <text>Teks respons atau string kosong jika aksi sudah handle</text>
+</response>
+</output>`,
   },
 };

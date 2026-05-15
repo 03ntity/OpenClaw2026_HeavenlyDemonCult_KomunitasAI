@@ -10,9 +10,9 @@ import { getHeader } from "./helpers.ts";
 
 const MCP_SANDBOX_URL = "https://api-sandbox.doku.com/doku-mcp-server/mcp";
 
-function sanitizeName(name: string): string {
+function sanitizeName(name: unknown): string {
   return (
-    (name ?? "Customer")
+    String(name ?? "Customer")
       .replace(/[^a-zA-Z0-9 ]/g, "")
       .trim()
       .slice(0, 50) || "Customer"
@@ -35,6 +35,16 @@ type JsonRpcResponse = {
     [key: string]: unknown;
   };
   error?: { code: number; message: string; data?: unknown };
+};
+
+type DirectPaymentResult = {
+  requestId: string;
+  invoiceNumber: string;
+  paymentInstruction: string;
+  paymentUrl?: string;
+  paymentCode?: string;
+  qrString?: string;
+  raw: unknown;
 };
 
 /**
@@ -204,9 +214,17 @@ export class DokuMcpClient {
     amount: number;
     invoiceNumber: string;
     customerName: string;
-  }) {
+  }): Promise<DirectPaymentResult> {
     this.assertConfigured();
-    return this.callTool("create_qris_payment", params);
+    const raw = await this.callToolWithFallback(
+      ["generate_payment_qris", "create_qris_payment"],
+      {
+        invoiceNumber: params.invoiceNumber,
+        amount: params.amount,
+        customerName: sanitizeName(params.customerName),
+      },
+    );
+    return normalizeDirectPaymentResult(raw, params.invoiceNumber, "QRIS");
   }
 
   async createVirtualAccount(params: {
@@ -215,9 +233,23 @@ export class DokuMcpClient {
     customerName: string;
     customerEmail?: string;
     bank: string;
-  }) {
+  }): Promise<DirectPaymentResult> {
     this.assertConfigured();
-    return this.callTool("create_virtual_account_payment", params);
+    const raw = await this.callToolWithFallback(
+      ["generate_payment_virtual_account", "create_virtual_account_payment"],
+      {
+        invoiceNumber: params.invoiceNumber,
+        amount: params.amount,
+        customerName: sanitizeName(params.customerName),
+        customerEmail: params.customerEmail ?? "",
+        bank: params.bank.toUpperCase(),
+      },
+    );
+    return normalizeDirectPaymentResult(
+      raw,
+      params.invoiceNumber,
+      `${params.bank.toUpperCase()} Virtual Account`,
+    );
   }
 
   // ── Webhook Signature Verification ────────────────────────────────────
@@ -289,16 +321,25 @@ export class DokuMcpClient {
       },
     });
 
-    const response = await fetch(this.mcpUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Client-Id": this.config.DOKU_CLIENT_ID!,
-        Authorization: this.authHeader,
-        Accept: "application/json, text/event-stream",
-      },
-      body,
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    let response: Response;
+
+    try {
+      response = await fetch(this.mcpUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Client-Id": this.config.DOKU_CLIENT_ID!,
+          Authorization: this.authHeader,
+          Accept: "application/json, text/event-stream",
+        },
+        body,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const json: JsonRpcResponse = await response.json().catch(() => ({}));
 
@@ -333,6 +374,28 @@ export class DokuMcpClient {
     return json.result as unknown as T;
   }
 
+  private async callToolWithFallback<T = Record<string, unknown>>(
+    toolNames: string[],
+    params: Record<string, unknown>,
+  ): Promise<T> {
+    let lastError: unknown;
+    for (const toolName of toolNames) {
+      try {
+        return await this.callTool<T>(toolName, params);
+      } catch (error) {
+        lastError = error;
+        logger.warn(
+          {
+            toolName,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "DOKU MCP tool call failed, trying fallback if available",
+        );
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
   private buildAuthHeader(): string {
     const apiKey = this.config.DOKU_MCP_API_KEY;
     if (!apiKey) return "";
@@ -353,4 +416,79 @@ function mapDokuStatus(raw: string): string {
   if (upper === "EXPIRED") return "EXPIRED";
   if (upper === "VOID" || upper === "CANCELLED") return "CANCELLED";
   return upper;
+}
+
+function findStringDeep(
+  value: unknown,
+  patterns: RegExp[],
+): string | undefined {
+  const seen = new Set<unknown>();
+  const visit = (item: unknown): string | undefined => {
+    if (!item || seen.has(item)) return undefined;
+    if (typeof item === "string") return undefined;
+    if (typeof item !== "object") return undefined;
+    seen.add(item);
+
+    for (const [key, rawValue] of Object.entries(
+      item as Record<string, unknown>,
+    )) {
+      if (
+        typeof rawValue === "string" &&
+        patterns.some((pattern) => pattern.test(key))
+      ) {
+        return rawValue;
+      }
+    }
+
+    for (const rawValue of Object.values(item as Record<string, unknown>)) {
+      if (Array.isArray(rawValue)) {
+        for (const child of rawValue) {
+          const found = visit(child);
+          if (found) return found;
+        }
+      } else {
+        const found = visit(rawValue);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  };
+  return visit(value);
+}
+
+function normalizeDirectPaymentResult(
+  raw: unknown,
+  fallbackInvoiceNumber: string,
+  label: string,
+): DirectPaymentResult {
+  const invoiceNumber =
+    findStringDeep(raw, [/invoice/i, /order.*number/i]) ??
+    fallbackInvoiceNumber;
+  const paymentUrl = findStringDeep(raw, [/url/i, /deeplink/i, /redirect/i]);
+  const paymentCode = findStringDeep(raw, [
+    /virtual.*account/i,
+    /\bva\b/i,
+    /payment.*code/i,
+    /account.*number/i,
+  ]);
+  const qrString = findStringDeep(raw, [/qr/i, /qris/i]);
+  const token = findStringDeep(raw, [/token/i, /request/i, /reference/i]);
+
+  const instructionParts = [
+    `${label} berhasil dibuat.`,
+    `Invoice: ${invoiceNumber}.`,
+    paymentCode ? `Kode/VA: ${paymentCode}.` : "",
+    paymentUrl ? `Link: ${paymentUrl}.` : "",
+    qrString ? `QRIS payload: ${qrString}.` : "",
+  ].filter(Boolean);
+
+  return {
+    requestId: token ?? invoiceNumber,
+    invoiceNumber,
+    paymentInstruction: instructionParts.join(" "),
+    paymentUrl,
+    paymentCode,
+    qrString,
+    raw,
+  };
 }

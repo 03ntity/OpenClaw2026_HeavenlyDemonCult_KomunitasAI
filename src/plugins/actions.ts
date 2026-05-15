@@ -4,6 +4,7 @@ import type {
   IAgentRuntime,
   Memory,
 } from "@elizaos/core";
+import { logger } from "@elizaos/core";
 import { getKomunitasService, KomunitasService } from "./komunitas-service.ts";
 import {
   getKasEntryTypeOption,
@@ -14,6 +15,7 @@ import {
   rupiah,
   sendCallback,
   toMonth,
+  generateTextSafe,
 } from "./helpers.ts";
 import * as dbModule from "../database/db.ts";
 
@@ -23,6 +25,158 @@ const pendingResetConfirmations = new Map<
 >();
 
 const FIVE_MINUTES = 5 * 60 * 1000;
+
+function getResetConfirmationKey(runtime: IAgentRuntime, message: Memory) {
+  return `${runtime.agentId}-${message.roomId ?? "default"}`;
+}
+
+function getWorkflowRequester(message: Memory):
+  | { phone?: string; channel?: string }
+  | undefined {
+  const content = message.content as Record<string, any>;
+  const metadataCandidates = [
+    content?.metadata,
+    (message as any)?.metadata,
+    (message as any)?.content?.metadata,
+  ];
+  for (const metadata of metadataCandidates) {
+    const phone = normalizeRequesterPhone(
+      metadata?.phone ??
+        metadata?.whatsappPhone ??
+        metadata?.author_id ??
+        metadata?.authorId,
+    );
+    if (phone) {
+      return {
+        phone,
+        channel: String(metadata?.source_type ?? metadata?.sourceType ?? "whatsapp"),
+      };
+    }
+  }
+  return undefined;
+}
+
+function normalizeRequesterPhone(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const digits = value.replace(/\D/g, "");
+  if (digits.length < 8 || digits.length > 15) return undefined;
+  return digits.startsWith("0") ? `62${digits.slice(1)}` : digits;
+}
+
+function parseRupiahAmountFromText(text: string): number | undefined {
+  const normalized = text.toLowerCase().replace(/rp\.?/g, " ");
+  const matches = [
+    ...normalized.matchAll(
+      /(\d+(?:[.,]\d{3})*(?:[.,]\d+)?)\s*(ribu|rb|k|juta|jt)?/g,
+    ),
+  ];
+
+  for (const match of matches) {
+    const raw = match[1];
+    const unit = match[2];
+    if (!raw) continue;
+    const compact = raw.replace(/[.,]/g, "");
+    const numeric =
+      unit && raw.includes(",")
+        ? Number(raw.replace(/\./g, "").replace(",", "."))
+        : Number(compact);
+    if (!Number.isFinite(numeric) || numeric <= 0) continue;
+    if (unit === "ribu" || unit === "rb" || unit === "k") {
+      return Math.round(numeric * 1000);
+    }
+    if (unit === "juta" || unit === "jt") {
+      return Math.round(numeric * 1_000_000);
+    }
+    return Math.round(numeric);
+  }
+
+  return undefined;
+}
+
+function inferKasTypeFromText(text: string): "income" | "expense" | undefined {
+  const lower = text.toLowerCase();
+  if (
+    lower.includes("pengeluaran") ||
+    lower.includes("keluar") ||
+    lower.includes("bayar") ||
+    lower.includes("beli") ||
+    lower.includes("dipakai") ||
+    lower.includes("pakai kas")
+  ) {
+    return "expense";
+  }
+  if (
+    lower.includes("pemasukan") ||
+    lower.includes("masuk") ||
+    lower.includes("terima") ||
+    lower.includes("donasi") ||
+    lower.includes("setoran")
+  ) {
+    return "income";
+  }
+  return undefined;
+}
+
+function inferKasCategoryFromText(text: string, type: "income" | "expense") {
+  const lower = text.toLowerCase();
+  const categories = [
+    "sampah",
+    "kebersihan",
+    "keamanan",
+    "listrik",
+    "air",
+    "konsumsi",
+    "perbaikan",
+    "iuran",
+    "donasi",
+    "operasional",
+  ];
+  const matched = categories.find((category) => lower.includes(category));
+  if (matched) return matched;
+
+  const purposeMatch = lower.match(
+    /(?:untuk|buat|bayar|pembayaran|beli)\s+(.+?)(?:[.!?]|$)/,
+  );
+  const purpose = purposeMatch?.[1]
+    ?.replace(/\b(?:rp|rupiah)\b\.?/g, "")
+    .replace(/\d+(?:[.,]\d{3})*(?:[.,]\d+)?\s*(?:ribu|rb|k|juta|jt)?/g, "")
+    .trim();
+  if (purpose) return purpose.slice(0, 40);
+
+  return type === "income" ? "pemasukan" : "pengeluaran";
+}
+
+async function findMemberByNameInMessage(
+  runtime: IAgentRuntime,
+  messageText: string,
+  members: Array<{ id: string; name: string }>,
+): Promise<string | undefined> {
+  if (members.length === 0) return undefined;
+
+  const nameList = members.map((m, i) => `${i + 1}. ${m.name}`).join("\n");
+  const result = await generateTextSafe(
+    runtime,
+    `Dari pesan berikut, siapa nama anggota yang disebutkan?
+
+Pesan: "${messageText}"
+
+Daftar anggota:
+${nameList}
+
+Jawab HANYA dengan nama lengkap anggota yang disebutkan (persis seperti di daftar), atau jawab "none" jika tidak ada yang disebutkan. Jangan tambahkan penjelasan apapun.`,
+  );
+
+  const answer = String(result ?? "")
+    .trim()
+    .toLowerCase();
+  if (answer === "none" || answer === "") return undefined;
+
+  const matched = members.find(
+    (m) =>
+      m.name.toLowerCase() === answer || m.name.toLowerCase().includes(answer),
+  );
+  return matched?.id;
+}
 
 function hasResetKeyword(text: string): boolean {
   const lower = text.toLowerCase();
@@ -49,7 +203,7 @@ export const getAllMembersAction: Action = {
   name: "GET_ALL_MEMBERS",
   similes: ["LIST_MEMBERS", "CEK_ANGGOTA", "DAFTAR_ANGGOTA"],
   description: "Lists all active members in the active community.",
-  validate: validateHasCommunity,
+  validate: async () => true,
   handler: async (
     runtime,
     message,
@@ -57,20 +211,49 @@ export const getAllMembersAction: Action = {
     options,
     callback,
   ): Promise<ActionResult> => {
-    const service = getKomunitasService(runtime);
-    const members = await service.listMembers(
-      getStringOption(options, "communityId"),
-      true,
-    );
-    const rows = members.map(
-      (member, index) =>
-        `${index + 1}. ${member.name}${member.phone ? ` (${member.phone})` : ""}`,
-    );
-    const text = members.length
-      ? `Ada ${members.length} anggota aktif:\n\n${rows.join("\n")}`
-      : "Belum ada anggota aktif di komunitas ini.";
-    await sendCallback(callback, message, text, ["GET_ALL_MEMBERS"]);
-    return { success: true, data: { members } };
+    const start = performance.now();
+    try {
+      const service = getKomunitasService(runtime);
+      const members = await service.listMembers(
+        getStringOption(options, "communityId"),
+        true,
+      );
+      const rows = members.map(
+        (member, index) =>
+          `${index + 1}. ${member.name}${member.phone ? ` (${member.phone})` : ""}`,
+      );
+      const text = members.length
+        ? `Ada ${members.length} anggota aktif:\n\n${rows.join("\n")}`
+        : "Belum ada anggota aktif di komunitas ini.";
+      await sendCallback(callback, message, text, ["GET_ALL_MEMBERS"]);
+      logger.info(
+        {
+          action: "GET_ALL_MEMBERS",
+          memberCount: members.length,
+          elapsedMs: Math.round(performance.now() - start),
+        },
+        "GET_ALL_MEMBERS completed",
+      );
+      return { success: true, text, data: { members } };
+    } catch (error) {
+      if (
+        await handleOnboardingError(error, callback, message, "GET_ALL_MEMBERS")
+      ) {
+        return { success: true };
+      }
+      const text = error instanceof Error ? error.message : String(error);
+      await sendCallback(
+        callback,
+        message,
+        `Gagal mengambil daftar anggota: ${text}`,
+        ["GET_ALL_MEMBERS"],
+      );
+      return {
+        success: false,
+        text,
+        error: error instanceof Error ? error : new Error(text),
+      };
+    }
   },
   examples: [
     [
@@ -106,19 +289,13 @@ export const createPaymentLinkAction: Action = {
 
       if (!memberId) {
         const messageText = (message.content.text ?? "").toLowerCase();
-        const members = await service.listMembers();
-        const matched = members.find(
-          (member) =>
-            messageText.includes(member.name.toLowerCase()) ||
-            member.name
-              .toLowerCase()
-              .split(" ")
-              .some((word) => word.length > 2 && messageText.includes(word)),
+        const community = await service.getCommunity();
+        const members = await service.listMembers(community.id);
+        memberId = await findMemberByNameInMessage(
+          runtime,
+          messageText,
+          members,
         );
-
-        if (matched) {
-          memberId = matched.id;
-        }
       }
 
       const result = await service.createPaymentLinkForMember({
@@ -164,6 +341,227 @@ export const createPaymentLinkAction: Action = {
   ],
 };
 
+function inferBankFromMessage(text: string): string | undefined {
+  const upper = text.toUpperCase();
+  const banks = ["BCA", "BNI", "BRI", "MANDIRI", "PERMATA", "CIMB"];
+  return banks.find((bank) => upper.includes(bank));
+}
+
+async function getMemberIdFromOptionsOrMessage(
+  runtime: IAgentRuntime,
+  message: Memory,
+  options: unknown,
+): Promise<string | undefined> {
+  const memberId = getStringOption(options, "memberId");
+  if (memberId) return memberId;
+  const messageText = String(message.content.text ?? "").toLowerCase();
+  const service = getKomunitasService(runtime);
+  const community = await service.getCommunity();
+  const members = await service.listMembers(community.id);
+  return findMemberByNameInMessage(runtime, messageText, members);
+}
+
+function buildQrisImageUrl(qrPayload: string): string {
+  const baseUrl =
+    process.env.QRIS_IMAGE_RENDERER_URL ??
+    "https://api.qrserver.com/v1/create-qr-code/";
+  const separator = baseUrl.includes("?") ? "&" : "?";
+  return `${baseUrl}${separator}size=512x512&format=jpg&data=${encodeURIComponent(qrPayload)}`;
+}
+
+function getQrisImageUrl(payment: {
+  paymentUrl?: string;
+  qrString?: string;
+}): string | undefined {
+  if (payment.qrString) return buildQrisImageUrl(payment.qrString);
+  if (payment.paymentUrl) return payment.paymentUrl;
+  return undefined;
+}
+
+export const createQrisBillAction: Action = {
+  name: "CREATE_QRIS_BILL",
+  similes: ["TAGIH_QRIS", "BUAT_QRIS", "GENERATE_QRIS_PAYMENT"],
+  description: "Creates a DOKU MCP QRIS payment request for one active member.",
+  validate: validateHasCommunity,
+  handler: async (
+    runtime,
+    message,
+    _state,
+    options,
+    callback,
+  ): Promise<ActionResult> => {
+    try {
+      const service = getKomunitasService(runtime);
+      const result = await service.createDirectPaymentForMember({
+        communityId: getStringOption(options, "communityId"),
+        memberId: await getMemberIdFromOptionsOrMessage(
+          runtime,
+          message,
+          options,
+        ),
+        period: getStringOption(options, "period"),
+        amount: getNumberOption(options, "amount"),
+        dueDays: getNumberOption(options, "dueDays"),
+        method: "qris",
+      });
+      const text = [
+        `Tagihan QRIS berhasil dibuat untuk ${result.member.name}.`,
+        `Nominal: ${rupiah(result.invoice.amount)}.`,
+        result.payment.paymentUrl
+          ? `Link staging/payment: ${result.payment.paymentUrl}`
+          : `Link staging/payment tidak tersedia dari response DOKU MCP.`,
+        result.payment.qrString
+          ? `QRIS payload: ${result.payment.qrString}`
+          : result.payment.paymentInstruction,
+      ].join("\n");
+
+      let waSent = false;
+      const qrisImageUrl = getQrisImageUrl(result.payment);
+      if (
+        result.member.phone &&
+        service.wahaClient.isConfigured &&
+        qrisImageUrl
+      ) {
+        const caption = [
+          `Tagihan QRIS ${result.community.name}`,
+          `Nama: ${result.member.name}`,
+          `Nominal: ${rupiah(result.invoice.amount)}`,
+          `Invoice: ${result.invoice.dokuInvoiceId}`,
+          result.payment.paymentUrl
+            ? `Link staging/payment: ${result.payment.paymentUrl}`
+            : `Link staging/payment: tidak tersedia`,
+          ``,
+          `Silakan scan QRIS pada gambar ini untuk membayar.`,
+        ].join("\n");
+        try {
+          await service.wahaClient.sendImage({
+            phone: result.member.phone,
+            imageUrl: qrisImageUrl,
+            caption,
+            filename: `qris-${result.invoice.dokuInvoiceId}.jpeg`,
+          });
+          waSent = true;
+        } catch (error) {
+          logger.warn(
+            {
+              memberId: result.member.id,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "WAHA QRIS image delivery failed",
+          );
+        }
+      }
+
+      const responseText = waSent
+        ? `${text}\n\nGambar QRIS sudah dikirim ke WhatsApp ${result.member.name}.`
+        : `${text}\n\nGambar QRIS belum terkirim ke WhatsApp. Pastikan nomor anggota dan WAHA sudah aktif.`;
+      await sendCallback(callback, message, responseText, ["CREATE_QRIS_BILL"]);
+      return { success: true, text: responseText, data: { ...result, waSent } };
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      await sendCallback(
+        callback,
+        message,
+        `Gagal membuat tagihan QRIS: ${text}`,
+        ["CREATE_QRIS_BILL"],
+      );
+      return {
+        success: false,
+        text,
+        error: error instanceof Error ? error : new Error(text),
+      };
+    }
+  },
+  examples: [
+    [
+      { name: "{{name1}}", content: { text: "Kirim tagihan QRIS untuk Budi" } },
+      {
+        name: "{{name2}}",
+        content: {
+          text: "",
+          actions: ["CREATE_QRIS_BILL"],
+        },
+      },
+    ],
+  ],
+};
+
+export const createBankTransferBillAction: Action = {
+  name: "CREATE_BANK_TRANSFER_BILL",
+  similes: ["TAGIH_BANK_TRANSFER", "BUAT_VA", "GENERATE_VIRTUAL_ACCOUNT"],
+  description:
+    "Creates a DOKU MCP Virtual Account payment request for bank transfer.",
+  validate: validateHasCommunity,
+  handler: async (
+    runtime,
+    message,
+    _state,
+    options,
+    callback,
+  ): Promise<ActionResult> => {
+    try {
+      const service = getKomunitasService(runtime);
+      const messageText = String(message.content.text ?? "");
+      const bank =
+        getStringOption(options, "bank") ??
+        inferBankFromMessage(messageText) ??
+        "BCA";
+      const result = await service.createDirectPaymentForMember({
+        communityId: getStringOption(options, "communityId"),
+        memberId: await getMemberIdFromOptionsOrMessage(
+          runtime,
+          message,
+          options,
+        ),
+        period: getStringOption(options, "period"),
+        amount: getNumberOption(options, "amount"),
+        dueDays: getNumberOption(options, "dueDays"),
+        method: "va",
+        bank,
+      });
+      const text = [
+        `Tagihan bank transfer/VA ${bank.toUpperCase()} berhasil dibuat untuk ${result.member.name}.`,
+        `Nominal: ${rupiah(result.invoice.amount)}.`,
+        result.payment.paymentCode
+          ? `Nomor VA/kode bayar: ${result.payment.paymentCode}`
+          : result.payment.paymentInstruction,
+      ].join("\n");
+      await sendCallback(callback, message, text, [
+        "CREATE_BANK_TRANSFER_BILL",
+      ]);
+      return { success: true, text, data: result };
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      await sendCallback(
+        callback,
+        message,
+        `Gagal membuat tagihan bank transfer: ${text}`,
+        ["CREATE_BANK_TRANSFER_BILL"],
+      );
+      return {
+        success: false,
+        text,
+        error: error instanceof Error ? error : new Error(text),
+      };
+    }
+  },
+  examples: [
+    [
+      {
+        name: "{{name1}}",
+        content: { text: "Kirim tagihan bank transfer BCA untuk Siti" },
+      },
+      {
+        name: "{{name2}}",
+        content: {
+          text: "",
+          actions: ["CREATE_BANK_TRANSFER_BILL"],
+        },
+      },
+    ],
+  ],
+};
+
 // ── BULK_CREATE_INVOICES ────────────────────────────────────────────────
 
 export const bulkCreateInvoicesAction: Action = {
@@ -181,7 +579,14 @@ export const bulkCreateInvoicesAction: Action = {
   ): Promise<ActionResult> => {
     try {
       const service = getKomunitasService(runtime);
-      const result = await service.bulkCreateInvoices({});
+      const community = await service.getCommunity(
+        getStringOption(_options, "communityId"),
+      );
+      await service.rememberWorkflowRequester(
+        community.id,
+        getWorkflowRequester(message),
+      );
+      const result = await service.bulkCreateInvoices({ runtime });
       const total = result.created.reduce(
         (sum, invoice) => sum + invoice.amount,
         0,
@@ -236,9 +641,12 @@ export const checkPaymentStatusAction: Action = {
       const result = await service.checkPaymentStatus(
         getStringOption(options, "invoiceId"),
       );
-      const text = `Status DOKU untuk invoice ${result.invoice.id}: ${String(result.status.status)}. Status lokal sekarang ${result.invoice.status}.`;
+      const text =
+        result.invoice.status === "paid"
+          ? `✅ Pembayaran sudah diterima. Invoice ${result.invoice.id} sekarang lunas sebesar ${rupiah(result.invoice.amount)}. Konfirmasi lunas dikirim ke WhatsApp member jika nomor tersedia.`
+          : `Status DOKU untuk invoice ${result.invoice.id}: ${String(result.status.status)}. Status lokal sekarang ${result.invoice.status}.`;
       await sendCallback(callback, message, text, ["CHECK_PAYMENT_STATUS"]);
-      return { success: true, data: result };
+      return { success: true, text, data: result };
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       await sendCallback(
@@ -286,9 +694,17 @@ export const runMonitoringLoopAction: Action = {
       const result = await service.checkPendingPayments(
         getStringOption(options, "communityId"),
       );
-      const text = `Monitoring selesai. Dicek ${result.checked.length} invoice, ${result.paid.length} terdeteksi lunas, ${result.unchanged.length} masih pending.`;
+      const paidLines = result.paid
+        .map(
+          (invoice, index) =>
+            `${index + 1}. ${invoice.dokuInvoiceId} - ${rupiah(invoice.amount)}`,
+        )
+        .join("\n");
+      const text = result.paid.length
+        ? `✅ Monitoring selesai. ${result.paid.length} invoice terdeteksi lunas dan konfirmasi dikirim ke WhatsApp member jika nomor tersedia.\n\n${paidLines}`
+        : `Monitoring selesai. Dicek ${result.checked.length} invoice, belum ada pembayaran baru, ${result.unchanged.length} masih pending.`;
       await sendCallback(callback, message, text, ["RUN_MONITORING_LOOP"]);
-      return { success: true, data: result };
+      return { success: true, text, data: result };
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       await sendCallback(callback, message, `Monitoring gagal: ${text}`, [
@@ -333,13 +749,39 @@ export const simulatePaymentAction: Action = {
   ): Promise<ActionResult> => {
     try {
       const service = getKomunitasService(runtime);
+      let invoiceId = getStringOption(options, "invoiceId");
+
+      if (!invoiceId) {
+        const messageText = (message.content.text ?? "").toLowerCase();
+        const community = await service.getCommunity();
+        const members = await service.listMembers(community.id);
+        const memberId = await findMemberByNameInMessage(
+          runtime,
+          messageText,
+          members,
+        );
+
+        if (memberId) {
+          const pendingInvoices = await service.listInvoices(community.id, {
+            status: "pending",
+          });
+          const memberInvoice = pendingInvoices.find(
+            (invoice) => invoice.memberId === memberId,
+          );
+
+          if (memberInvoice) {
+            invoiceId = memberInvoice.id;
+          }
+        }
+      }
+
       const result = await service.simulatePayment({
         communityId: getStringOption(options, "communityId"),
-        invoiceId: getStringOption(options, "invoiceId"),
+        invoiceId,
       });
-      const text = `Simulasi pembayaran berhasil. Invoice ${result.invoice.id} ditandai lunas dan kas bertambah ${rupiah(result.invoice.amount)}.`;
+      const text = `Simulasi pembayaran berhasil. Invoice ${result.invoice.id} ditandai lunas, kas bertambah ${rupiah(result.invoice.amount)}, dan konfirmasi lunas dikirim ke WhatsApp member jika nomor tersedia.`;
       await sendCallback(callback, message, text, ["SIMULATE_PAYMENT"]);
-      return { success: true, data: result };
+      return { success: true, text, data: result };
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       await sendCallback(
@@ -386,7 +828,6 @@ export const getUnpaidInvoicesAction: Action = {
     const community = await service.getCommunity();
     const invoices = await service.listInvoices(community.id, {
       status: "pending",
-      month: toMonth(),
     });
     const memberList = await service.listMembers(community.id);
     const members = new Map(memberList.map((m) => [m.id, m]));
@@ -396,8 +837,8 @@ export const getUnpaidInvoicesAction: Action = {
         `${index + 1}. ${members.get(invoice.memberId)?.name ?? invoice.memberId} - ${rupiah(invoice.amount)}`,
     );
     const text = invoices.length
-      ? `Ada ${invoices.length} anggota yang belum bayar bulan ini.\n\n${rows.join("\n")}\n\nTotal belum terkumpul: ${rupiah(total)}.`
-      : "Semua invoice bulan ini sudah lunas atau belum ada invoice pending.";
+      ? `Ada ${invoices.length} anggota yang belum bayar (semua periode).\n\n${rows.join("\n")}\n\nTotal belum terkumpul: ${rupiah(total)}.`
+      : "Semua invoice sudah lunas atau belum ada invoice pending.";
     await sendCallback(callback, message, text, ["GET_UNPAID_INVOICES"]);
     return { success: true, data: { invoices } };
   },
@@ -435,7 +876,7 @@ export const sendReminderAction: Action = {
   ): Promise<ActionResult> => {
     const service = getKomunitasService(runtime);
     const result = await service.sendPaymentReminders({});
-    const text = `Reminder disiapkan untuk ${result.reminded.length} invoice pending. ${result.skipped} invoice dilewati karena sudah mencapai batas reminder.`;
+    const text = `✅ Reminder tercatat untuk ${result.reminded.length} anggota.\n📱 WA terkirim ke ${result.waSent} anggota, ${result.waFailed} gagal.\n⚠️ Notifikasi hanya via WA jika nomor terdaftar.`;
     await sendCallback(callback, message, text, ["SEND_PAYMENT_REMINDERS"]);
     return { success: true, data: result };
   },
@@ -467,75 +908,19 @@ export const getKasSummaryAction: Action = {
     runtime,
     message,
     _state,
-    options,
+    _options,
     callback,
   ): Promise<ActionResult> => {
     const service = getKomunitasService(runtime);
     const community = await service.getCommunity();
-    const input = (message.content.text ?? "").trim();
-    const resetType = getStringOption(options, "type");
-
-    const isPendingConfirmation = await dbModule.getOnboardingState(
-      `reset_confirm_${runtime.agentId}`,
-    );
-
-    if (!isPendingConfirmation) {
-      const invoices = await service.listInvoices(community.id);
-      const members = await service.listMembers(community.id);
-      await dbModule.setOnboardingState(`reset_confirm_${runtime.agentId}`, {
-        pending: true,
-        communityId: community.id,
-      });
-      const text = [
-        `⚠️ Kamu mau bersihkan data apa untuk komunitas **"${community.name}"**?`,
-        ``,
-        `**Opsi 1 — Hapus transaksi saja** (anggota tetap ada):`,
-        `- ${invoices.length} invoice`,
-        `- Semua catatan kas & log aktivitas`,
-        `→ Balas: **"hapus transaksi saja"**`,
-        ``,
-        `**Opsi 2 — Hapus semua data** (termasuk ${members.length} anggota & komunitas):`,
-        `→ Balas: **"hapus semua data"**`,
-        ``,
-        `Atau balas **"batal"** untuk membatalkan.`,
-      ].join("\n");
-      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
-      return { success: true, data: { awaitingConfirmation: true } };
-    }
-
-    await dbModule.clearOnboardingState(`reset_confirm_${runtime.agentId}`);
-
-    const intent =
-      resetType === "all"
-        ? "confirm_all"
-        : resetType === "transactions"
-          ? "confirm_transactions"
-          : await classifyResetIntent(runtime, input);
-
-    if (intent === "cancel" || intent === "unknown") {
-      const text =
-        intent === "cancel"
-          ? `Oke, tidak jadi hapus data. Data komunitas "${community.name}" tetap aman. 😊`
-          : `Tidak yakin maksudnya apa. Data tidak dihapus. Ketik "hapus data komunitas" untuk mulai ulang.`;
-      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
-      return { success: true, data: { cancelled: true } };
-    }
-
-    if (intent === "confirm_all") {
-      await dbModule.resetCommunityData(community.id);
-      await dbModule.clearOnboardingState(runtime.agentId);
-      const text = `✅ Semua data komunitas "${community.name}" telah dihapus. Ketik "buat komunitas baru" untuk setup ulang.`;
-      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
-    } else {
-      await dbModule.resetCommunityTransactions(community.id);
-      const text = `✅ Data transaksi komunitas "${community.name}" telah dibersihkan. Anggota dan komunitas tetap ada.`;
-      await sendCallback(callback, message, text, ["RESET_COMMUNITY_DATA"]);
-    }
-
-    return {
-      success: true,
-      data: { reset: true, intent, communityId: community.id },
-    };
+    const summary = await service.getKasSummary(community.id);
+    const text = [
+      `Saldo kas ${community.name} saat ini ${rupiah(summary.currentBalance)}.`,
+      `Total pemasukan ${rupiah(summary.totalIncome)}.`,
+      `Total pengeluaran ${rupiah(summary.totalExpense)}.`,
+    ].join("\n");
+    await sendCallback(callback, message, text, ["GET_KAS_SUMMARY"]);
+    return { success: true, data: { summary, communityId: community.id } };
   },
   examples: [
     [
@@ -611,28 +996,52 @@ export const updateKasBalanceAction: Action = {
     options,
     callback,
   ): Promise<ActionResult> => {
-    const service = getKomunitasService(runtime);
-    const type = getKasEntryTypeOption(options) ?? "expense";
-    const amount = getNumberOption(options, "amount") ?? 25000;
-    const category =
-      getStringOption(options, "category") ??
-      (type === "income" ? "pemasukan-manual" : "pengeluaran-manual");
-    const description =
-      getStringOption(options, "description") ??
-      (type === "income"
-        ? "Pemasukan manual dari agent"
-        : "Pengeluaran manual dari agent");
-    const result = await service.updateKasBalance({
-      communityId: getStringOption(options, "communityId"),
-      type,
-      amount,
-      category,
-      description,
-      referenceId: getStringOption(options, "referenceId"),
-    });
-    const text = `Kas dicatat: ${type === "income" ? "pemasukan" : "pengeluaran"} ${rupiah(amount)} untuk ${category}. Saldo baru ${rupiah(result.newBalance)}.`;
-    await sendCallback(callback, message, text, ["UPDATE_KAS_BALANCE"]);
-    return { success: true, data: result };
+    try {
+      const service = getKomunitasService(runtime);
+      const messageText = String(message.content.text ?? "");
+      const type =
+        getKasEntryTypeOption(options) ??
+        inferKasTypeFromText(messageText) ??
+        "expense";
+      const amount =
+        getNumberOption(options, "amount") ??
+        parseRupiahAmountFromText(messageText);
+
+      if (!amount) {
+        const text =
+          "Nominal kas belum jelas. Contoh: `catat pengeluaran Rp 20.000 untuk bayar sampah`.";
+        await sendCallback(callback, message, text, ["UPDATE_KAS_BALANCE"]);
+        return { success: false, text, error: new Error(text) };
+      }
+
+      const category =
+        getStringOption(options, "category") ??
+        inferKasCategoryFromText(messageText, type);
+      const description =
+        getStringOption(options, "description") ??
+        `${type === "income" ? "Pemasukan" : "Pengeluaran"} kas untuk ${category}`;
+      const result = await service.updateKasBalance({
+        communityId: getStringOption(options, "communityId"),
+        type,
+        amount,
+        category,
+        description,
+        referenceId: getStringOption(options, "referenceId"),
+      });
+      const text = `Kas dicatat: ${type === "income" ? "pemasukan" : "pengeluaran"} ${rupiah(amount)} untuk ${category}. Saldo baru ${rupiah(result.newBalance)}.`;
+      await sendCallback(callback, message, text, ["UPDATE_KAS_BALANCE"]);
+      return { success: true, text, data: result };
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      await sendCallback(callback, message, `Gagal mencatat kas: ${text}`, [
+        "UPDATE_KAS_BALANCE",
+      ]);
+      return {
+        success: false,
+        text,
+        error: error instanceof Error ? error : new Error(text),
+      };
+    }
   },
   examples: [
     [
@@ -669,9 +1078,9 @@ export const markInvoicePaidManualAction: Action = {
         invoiceId: getStringOption(options, "invoiceId"),
         note: getStringOption(options, "note"),
       });
-      const text = `Invoice ${invoice.id} ditandai lunas manual. Kas bertambah ${rupiah(invoice.amount)}.`;
+      const text = `Invoice ${invoice.id} ditandai lunas manual. Kas bertambah ${rupiah(invoice.amount)}, dan konfirmasi lunas dikirim ke WhatsApp member jika nomor tersedia.`;
       await sendCallback(callback, message, text, ["MARK_INVOICE_PAID_MANUAL"]);
-      return { success: true, data: { invoice } };
+      return { success: true, text, data: { invoice } };
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       await sendCallback(callback, message, `Gagal tandai lunas: ${text}`, [
@@ -802,11 +1211,17 @@ export const runBillingLoopAction: Action = {
   ): Promise<ActionResult> => {
     try {
       const service = getKomunitasService(runtime);
+      const requester = getWorkflowRequester(message);
+      const community = await service.getCommunity(
+        getStringOption(options, "communityId"),
+      );
+      await service.rememberWorkflowRequester(community.id, requester);
       const result = await service.bulkCreateInvoices({
-        communityId: getStringOption(options, "communityId"),
+        communityId: community.id,
         period: getStringOption(options, "period"),
         amount: getNumberOption(options, "amount"),
         dueDays: getNumberOption(options, "dueDays"),
+        runtime,
       });
       const total = result.created.reduce(
         (sum, invoice) => sum + invoice.amount,
@@ -966,6 +1381,9 @@ export const fullBillingWorkflowAction: Action = {
     callback,
   ): Promise<ActionResult> => {
     const service = getKomunitasService(runtime);
+    const requester = getWorkflowRequester(message);
+    const community = await service.getCommunity();
+    await service.rememberWorkflowRequester(community.id, requester);
     const steps: Record<string, unknown>[] = [];
 
     let invoiceCount = 0;
@@ -974,12 +1392,20 @@ export const fullBillingWorkflowAction: Action = {
     let collectionRate = "0%";
 
     try {
-      const billing = await service.bulkCreateInvoices({});
+      const billing = await service.bulkCreateInvoices({
+        communityId: community.id,
+        runtime,
+      });
       invoiceCount = billing.created.length;
       steps.push({
         step: "billing",
         created: invoiceCount,
         skipped: billing.skipped.length,
+        ...(billing.errors.length > 0
+          ? {
+              error: `${billing.errors.length} anggota gagal dibuatkan invoice`,
+            }
+          : {}),
       });
     } catch (e) {
       steps.push({
@@ -1029,7 +1455,15 @@ export const fullBillingWorkflowAction: Action = {
       });
     }
 
-    const text = `Workflow selesai: ${invoiceCount} invoice dibuat, ${paidCount} sudah bayar, ${reminderCount} reminder dikirim. Collection rate: ${collectionRate}.`;
+    const failedSteps = steps
+      .filter((step) => "error" in step)
+      .map((step) => String(step.step));
+    const text = [
+      `Workflow selesai: ${invoiceCount} invoice dibuat, ${paidCount} sudah bayar, ${reminderCount} reminder dikirim. Collection rate: ${collectionRate}.`,
+      failedSteps.length > 0 ? `⚠️ Ada error: ${failedSteps.join(", ")}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
     await sendCallback(callback, message, text, ["FULL_BILLING_WORKFLOW"]);
     return { success: true, data: { steps } };
   },
@@ -1056,50 +1490,6 @@ type ResetIntent =
   | "cancel"
   | "unknown";
 
-async function classifyResetIntent(
-  runtime: IAgentRuntime,
-  userInput: string,
-): Promise<ResetIntent> {
-  const lower = userInput.toLowerCase();
-
-  if (
-    lower.includes("batal") ||
-    lower.includes("cancel") ||
-    lower.includes("tidak jadi") ||
-    lower.includes("jangan")
-  )
-    return "cancel";
-
-  if (
-    lower.includes("semua") ||
-    lower.includes("all") ||
-    lower.includes("komunitas") ||
-    lower.includes("anggota")
-  )
-    return "confirm_all";
-
-  if (
-    lower.includes("transaksi") ||
-    lower.includes("invoice") ||
-    lower.includes("kas") ||
-    lower.includes("log")
-  )
-    return "confirm_transactions";
-
-  const result = await (runtime as any).generateText({
-    context: `Klasifikasikan intent user. Input: "${userInput}". Pilih: confirm_transactions, confirm_all, cancel, atau unknown. Jawab SATU kata saja.`,
-  });
-
-  const trimmed = (result ?? "").trim().toLowerCase() as ResetIntent;
-  const valid: ResetIntent[] = [
-    "confirm_transactions",
-    "confirm_all",
-    "cancel",
-    "unknown",
-  ];
-  return valid.includes(trimmed) ? trimmed : "unknown";
-}
-
 export const resetCommunityDataAction: Action = {
   name: "RESET_COMMUNITY_DATA",
   similes: [
@@ -1116,7 +1506,7 @@ export const resetCommunityDataAction: Action = {
     if (!hasCommunity) return false;
 
     const text = (message.content.text ?? "").toLowerCase();
-    const pendingKey = runtime.agentId;
+    const pendingKey = getResetConfirmationKey(runtime, message);
     const pending = pendingResetConfirmations.get(pendingKey);
     const isStillPending = pending && Date.now() - pending.ts < FIVE_MINUTES;
 
@@ -1131,22 +1521,23 @@ export const resetCommunityDataAction: Action = {
   ): Promise<ActionResult> => {
     const service = getKomunitasService(runtime);
     const community = await service.getCommunity();
+    const requester = getWorkflowRequester(message);
     const input = (message.content.text ?? "").trim();
     const resetType = getStringOption(options, "type");
     const text = input.toLowerCase();
     const hasKeyword = hasResetKeyword(text);
 
-    const pendingKey = `${runtime.agentId}`;
+    const pendingKey = getResetConfirmationKey(runtime, message);
     const pending = pendingResetConfirmations.get(pendingKey);
     const isStillPending = pending && Date.now() - pending.ts < FIVE_MINUTES;
 
     if (!isStillPending && !hasKeyword) {
-      const invoices = await service.listInvoices(community.id);
-      const members = await service.listMembers(community.id);
       pendingResetConfirmations.set(pendingKey, {
         communityId: community.id,
         ts: Date.now(),
       });
+      const invoices = await service.listInvoices(community.id);
+      const members = await service.listMembers(community.id);
       const text = [
         `⚠️ Kamu mau bersihkan data apa untuk komunitas **"${community.name}"**?`,
         ``,
@@ -1171,7 +1562,37 @@ export const resetCommunityDataAction: Action = {
         ? "confirm_all"
         : resetType === "transactions"
           ? "confirm_transactions"
-          : await classifyResetIntent(runtime, input);
+          : ((): ResetIntent => {
+              const lower = input.toLowerCase();
+              if (
+                lower.includes("batal") ||
+                lower.includes("cancel") ||
+                lower.includes("tidak jadi") ||
+                lower.includes("jangan") ||
+                lower.includes("ga jadi") ||
+                lower.includes("gak jadi")
+              )
+                return "cancel";
+              if (
+                lower.includes("semua") ||
+                lower.includes("all") ||
+                lower.includes("komunitas") ||
+                lower.includes("anggota") ||
+                lower.includes("hapus semua") ||
+                lower.includes("reset semua")
+              )
+                return "confirm_all";
+              if (
+                lower.includes("transaksi") ||
+                lower.includes("invoice") ||
+                lower.includes("kas") ||
+                lower.includes("log") ||
+                lower.includes("hapus transaksi") ||
+                lower.includes("transaksi saja")
+              )
+                return "confirm_transactions";
+              return "unknown";
+            })();
 
     if (intent === "cancel" || intent === "unknown") {
       const text =
@@ -1212,11 +1633,149 @@ export const resetCommunityDataAction: Action = {
   ],
 };
 
+// ── SET_WORKFLOW_SCHEDULE ────────────────────────────────────────────────
+
+export const setWorkflowScheduleAction: Action = {
+  name: "SET_WORKFLOW_SCHEDULE",
+  similes: [
+    "ATUR_JADWAL_WORKFLOW",
+    "JADWALKAN_WORKFLOW",
+    "SET_SCHEDULE",
+    "UBAH_JADWAL",
+    "CANCEL_SCHEDULE",
+    "HENTIKAN_JADWAL",
+  ],
+  description:
+    "Set, update, or cancel the automatic workflow schedule for the community. User can specify interval in minutes, hours, or days.",
+  validate: validateHasCommunity,
+  handler: async (
+    runtime,
+    message,
+    _state,
+    _options,
+    callback,
+  ): Promise<ActionResult> => {
+    const service = getKomunitasService(runtime);
+    const community = await service.getCommunity();
+    const requester = getWorkflowRequester(message);
+    const input = (message.content.text ?? "").trim();
+
+    const raw = await generateTextSafe(
+      runtime,
+      `Ekstrak intent penjadwalan dari pesan berikut: "${input}"
+
+Tentukan:
+1. action: "set" (atur/ubah jadwal) atau "cancel" (batalkan/hentikan jadwal)
+2. intervalMs: interval dalam milidetik (hanya jika action = "set")
+
+Konversi waktu:
+- "X menit" → X * 60000
+- "X jam" → X * 3600000
+- "X hari" → X * 86400000
+- "setiap hari" → 86400000
+- "setiap jam" → 3600000
+
+Jawab HANYA dengan JSON: {"action":"set","intervalMs":60000} atau {"action":"cancel"}`,
+    );
+
+    let intent: { action: "set" | "cancel"; intervalMs?: number };
+    try {
+      const jsonStr = String(raw ?? "")
+        .trim()
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```$/, "")
+        .trim();
+      intent = JSON.parse(jsonStr);
+    } catch {
+      await sendCallback(
+        callback,
+        message,
+        `Tidak bisa memahami jadwal yang diminta. Contoh: "jalankan workflow setiap 1 jam" atau "hentikan jadwal otomatis".`,
+        ["SET_WORKFLOW_SCHEDULE"],
+      );
+      return { success: false };
+    }
+
+    if (intent.action === "cancel") {
+      await service.cancelWorkflowSchedule(community.id);
+      await sendCallback(
+        callback,
+        message,
+        `✅ Jadwal workflow otomatis untuk komunitas "${community.name}" telah dihentikan.`,
+        ["SET_WORKFLOW_SCHEDULE"],
+      );
+      return { success: true, data: { cancelled: true } };
+    }
+
+    const intervalMs = intent.intervalMs;
+    if (!intervalMs || intervalMs < 60000) {
+      await sendCallback(
+        callback,
+        message,
+        `Interval minimal 1 menit. Contoh: "jalankan workflow setiap 5 menit" atau "setiap 1 jam".`,
+        ["SET_WORKFLOW_SCHEDULE"],
+      );
+      return { success: false };
+    }
+
+    await service.setWorkflowSchedule(community.id, intervalMs, requester);
+    await service.rememberWorkflowRequester(community.id, requester);
+
+    const humanInterval =
+      intervalMs >= 86400000
+        ? `${intervalMs / 86400000} hari`
+        : intervalMs >= 3600000
+          ? `${intervalMs / 3600000} jam`
+          : `${intervalMs / 60000} menit`;
+
+    const schedule = await (
+      await import("../database/db.ts")
+    ).getWorkflowSchedule(community.id);
+    await sendCallback(
+      callback,
+      message,
+      `✅ Workflow otomatis dijadwalkan setiap *${humanInterval}* untuk komunitas "${community.name}".\n\nWorkflow akan menjalankan: tagih → cek pembayaran → kirim reminder.\n\nKetik "hentikan jadwal" untuk membatalkan.`,
+      ["SET_WORKFLOW_SCHEDULE"],
+    );
+    return {
+      success: true,
+      data: { intervalMs, communityId: community.id, schedule },
+    };
+  },
+  examples: [
+    [
+      {
+        name: "{{name1}}",
+        content: { text: "jalankan workflow setiap 1 jam" },
+      },
+      {
+        name: "{{name2}}",
+        content: {
+          text: "",
+          actions: ["SET_WORKFLOW_SCHEDULE"],
+        },
+      },
+    ],
+    [
+      { name: "{{name1}}", content: { text: "hentikan jadwal otomatis" } },
+      {
+        name: "{{name2}}",
+        content: {
+          text: "",
+          actions: ["SET_WORKFLOW_SCHEDULE"],
+        },
+      },
+    ],
+  ],
+};
+
 // ── Exported list ───────────────────────────────────────────────────────
 
 export const allActions: Action[] = [
   getAllMembersAction,
   createPaymentLinkAction,
+  createQrisBillAction,
+  createBankTransferBillAction,
   bulkCreateInvoicesAction,
   checkPaymentStatusAction,
   runMonitoringLoopAction,
@@ -1234,4 +1793,5 @@ export const allActions: Action[] = [
   calculateSplitBillAction,
   fullBillingWorkflowAction,
   resetCommunityDataAction,
+  setWorkflowScheduleAction,
 ];

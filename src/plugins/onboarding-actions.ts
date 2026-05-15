@@ -17,6 +17,8 @@ import {
   parseMoneyInput,
   getOnboardingPrompt,
   getCommunityTypeFromRuntime,
+  getBatchFormPrompt,
+  parseBatchFormInput,
 } from "./onboarding.ts";
 import { generateCharacter, saveCharacterFile } from "./character-generator.ts";
 import type { CommunityType } from "./types.ts";
@@ -35,6 +37,54 @@ async function saveCtx(runtime: IAgentRuntime, ctx: OnboardingContext) {
 
 async function clearCtx(runtime: IAgentRuntime) {
   await db.setOnboardingState(runtime.agentId, { state: "READY" });
+}
+
+async function createCommunityFromBatch(
+  type: CommunityType,
+  parsed: {
+    name?: string;
+    description?: string;
+    monthlyFee?: number;
+    members: Array<{ name: string; phone?: string }>;
+  },
+) {
+  if (!parsed.name || !parsed.monthlyFee) {
+    throw new Error("Nama komunitas dan nominal iuran wajib diisi.");
+  }
+
+  const communityId = `community-${type}-${randomUUID().slice(0, 8)}`;
+
+  await db.initSchema();
+  await db.createCommunity({
+    id: communityId,
+    name: parsed.name,
+    type,
+    description: parsed.description,
+    monthlyFee: parsed.monthlyFee,
+  });
+
+  for (const member of parsed.members) {
+    await db.upsertMember({
+      id: `member-${randomUUID().slice(0, 8)}`,
+      communityId,
+      name: member.name,
+      phone: member.phone,
+    });
+  }
+
+  const character = generateCharacter({
+    communityId,
+    communityName: parsed.name,
+    communityType: type,
+    monthlyFee: parsed.monthlyFee,
+  });
+  saveCharacterFile(communityId, character);
+
+  return {
+    communityId,
+    communityName: parsed.name,
+    memberCount: parsed.members.length,
+  };
 }
 
 function parseBatchMembers(input: string): string[] {
@@ -67,7 +117,7 @@ export const startOnboardingAction: Action = {
     const typeFromCharacter = getCommunityTypeFromRuntime(runtime as any);
     const ctx: OnboardingContext = typeFromCharacter
       ? {
-          state: "COLLECTING_COMMUNITY",
+          state: "AWAITING_BATCH_INPUT",
           communityType: typeFromCharacter,
           draft: {},
         }
@@ -126,7 +176,7 @@ export const handleOnboardingInputAction: Action = {
         return { success: true };
       }
       const newCtx: OnboardingContext = {
-        state: "COLLECTING_COMMUNITY",
+        state: "AWAITING_BATCH_INPUT",
         communityType: type,
         draft: {},
       };
@@ -136,6 +186,58 @@ export const handleOnboardingInputAction: Action = {
       const text = `Oke, kita setup ${label}!\n\n${prompt}`;
       await sendCallback(callback, message, text, ["HANDLE_ONBOARDING_INPUT"]);
       return { success: true };
+    }
+
+    if (
+      ctx.state === "COLLECTING_COMMUNITY" &&
+      ctx.communityType &&
+      Object.keys(ctx.draft ?? {}).length === 0
+    ) {
+      const updatedCtx: OnboardingContext = {
+        ...ctx,
+        state: "AWAITING_BATCH_INPUT",
+      };
+      await saveCtx(runtime, updatedCtx);
+      const text = getBatchFormPrompt(ctx.communityType);
+      await sendCallback(callback, message, text, ["HANDLE_ONBOARDING_INPUT"]);
+      return { success: true };
+    }
+
+    if (ctx.state === "AWAITING_BATCH_INPUT" && ctx.communityType) {
+      const parsed = parseBatchFormInput(input, ctx.communityType);
+
+      if (!parsed.name || !parsed.monthlyFee) {
+        const missing = [
+          !parsed.name ? "nama komunitas" : null,
+          !parsed.monthlyFee ? "nominal/iuran" : null,
+        ]
+          .filter(Boolean)
+          .join(" dan ");
+        const text = [
+          `Data belum lengkap. Mohon isi ${missing} dengan format berikut:`,
+          "",
+          getBatchFormPrompt(ctx.communityType),
+        ].join("\n");
+        await sendCallback(callback, message, text, [
+          "HANDLE_ONBOARDING_INPUT",
+        ]);
+        return { success: true };
+      }
+
+      const created = await createCommunityFromBatch(ctx.communityType, parsed);
+      await clearCtx(runtime);
+
+      const text = [
+        `✅ Setup selesai! ${created.communityName} dengan ${created.memberCount} anggota berhasil dibuat.`,
+        `Character file disimpan untuk agent baru.`,
+        ``,
+        `Kamu sekarang bisa:`,
+        `- "Tagih iuran bulan ini" — buat invoice DOKU untuk semua anggota`,
+        `- "Berapa saldo kas?" — cek saldo`,
+        `- "Siapa yang belum bayar?" — lihat tunggakan`,
+      ].join("\n");
+      await sendCallback(callback, message, text, ["HANDLE_ONBOARDING_INPUT"]);
+      return { success: true, data: { communityId: created.communityId } };
     }
 
     if (ctx.state === "COLLECTING_COMMUNITY" && ctx.communityType) {

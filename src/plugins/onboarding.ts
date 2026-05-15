@@ -4,6 +4,7 @@ export type OnboardingState =
   | "EMPTY"
   | "CHOOSING_TYPE"
   | "COLLECTING_COMMUNITY"
+  | "AWAITING_BATCH_INPUT"
   | "COLLECTING_MEMBERS"
   | "READY";
 
@@ -189,12 +190,11 @@ export function getOnboardingPrompt(ctx: OnboardingContext): string {
   }
 
   if (ctx.state === "COLLECTING_COMMUNITY" && ctx.communityType) {
-    const fields = COMMUNITY_FIELDS[ctx.communityType];
-    const draft = ctx.draft ?? {};
-    const nextField = fields.find((f) => !draft[f.key]);
-    if (nextField) {
-      return `${nextField.label}?\n(${nextField.hint})`;
-    }
+    return getBatchFormPrompt(ctx.communityType);
+  }
+
+  if (ctx.state === "AWAITING_BATCH_INPUT" && ctx.communityType) {
+    return getBatchFormPrompt(ctx.communityType);
   }
 
   if (ctx.state === "COLLECTING_MEMBERS" && ctx.communityType) {
@@ -209,6 +209,145 @@ export function getOnboardingPrompt(ctx: OnboardingContext): string {
   }
 
   return "";
+}
+
+export function getBatchFormPrompt(
+  type: CommunityType,
+  _agentName?: string,
+): string {
+  const forms: Record<CommunityType, string[]> = {
+    rt: [
+      "Isi info berikut dalam satu pesan:",
+      "",
+      "Nama RT/RW: [contoh: RT 05 RW 03 Kelapa Gading]",
+      "Kelurahan/Kecamatan: [contoh: Kelapa Gading Barat]",
+      "Iuran bulanan (Rp): [contoh: 50000]",
+      "",
+      "Daftar warga (nama - nomor HP):",
+      "1. [nama] - [nomor HP]",
+      "2. [nama] - [nomor HP]",
+    ],
+    arisan: [
+      "Isi info berikut dalam satu pesan:",
+      "",
+      "Nama arisan: [contoh: Arisan PKK RT 05]",
+      "Jadwal kumpul: [contoh: Setiap Jumat pertama]",
+      "Nominal arisan (Rp): [contoh: 200000]",
+      "",
+      "Daftar peserta (nama - nomor HP):",
+      "1. [nama] - [nomor HP]",
+      "2. [nama] - [nomor HP]",
+    ],
+    koperasi: [
+      "Isi info berikut dalam satu pesan:",
+      "",
+      "Nama koperasi: [contoh: Koperasi Maju Bersama]",
+      "Jenis koperasi: [contoh: Simpan Pinjam]",
+      "Iuran wajib bulanan (Rp): [contoh: 100000]",
+      "",
+      "Daftar anggota (nama - nomor HP):",
+      "1. [nama] - [nomor HP]",
+      "2. [nama] - [nomor HP]",
+    ],
+    event: [
+      "Isi info berikut dalam satu pesan:",
+      "",
+      "Nama event: [contoh: Panitia 17 Agustus 2026]",
+      "Tanggal event: [contoh: 17 Agustus 2026]",
+      "Kontribusi per orang (Rp): [contoh: 75000]",
+      "",
+      "Daftar peserta (nama - nomor HP):",
+      "1. [nama] - [nomor HP]",
+      "2. [nama] - [nomor HP]",
+    ],
+    other: [
+      "Isi info berikut dalam satu pesan:",
+      "",
+      "Nama patungan: [contoh: Patungan Liburan Bali]",
+      "Nominal per orang (Rp): [contoh: 500000]",
+      "",
+      "Daftar peserta (nama - nomor HP):",
+      "1. [nama] - [nomor HP]",
+      "2. [nama] - [nomor HP]",
+    ],
+  };
+
+  return forms[type].join("\n");
+}
+
+export function parseBatchFormInput(
+  input: string,
+  _type: CommunityType,
+): {
+  name?: string;
+  description?: string;
+  monthlyFee?: number;
+  members: Array<{ name: string; phone?: string }>;
+} {
+  const result: {
+    name?: string;
+    description?: string;
+    monthlyFee?: number;
+    members: Array<{ name: string; phone?: string }>;
+  } = { members: [] };
+
+  for (const line of input.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const memberMatch = trimmed.match(/^\d+[\.)]\s*(.+)$/);
+    if (memberMatch?.[1]) {
+      const [rawName, rawPhone] = memberMatch[1].split(/\s+-\s+/, 2);
+      const name = rawName.trim();
+      if (name && !name.includes("[")) {
+        const phone = normalizePhone(rawPhone);
+        result.members.push(phone ? { name, phone } : { name });
+      }
+      continue;
+    }
+
+    if (!trimmed.includes(":")) continue;
+
+    const [rawKey, ...valueParts] = trimmed.split(":");
+    const key = rawKey.toLowerCase().trim();
+    const value = valueParts.join(":").trim();
+    if (!value || value.includes("[contoh:")) continue;
+
+    if (key.includes("nama")) {
+      result.name = value;
+      continue;
+    }
+
+    if (
+      key.includes("nominal") ||
+      key.includes("iuran") ||
+      key.includes("kontribusi")
+    ) {
+      const amount = parseMoneyInput(value);
+      if (amount) result.monthlyFee = amount;
+      continue;
+    }
+
+    if (
+      key.includes("jadwal") ||
+      key.includes("jenis") ||
+      key.includes("tanggal") ||
+      key.includes("kelurahan") ||
+      key.includes("kecamatan") ||
+      key.includes("deskripsi")
+    ) {
+      result.description = value;
+    }
+  }
+
+  return result;
+}
+
+function normalizePhone(phone?: string): string | undefined {
+  if (!phone) return undefined;
+  const digits = phone.replace(/[^0-9]/g, "");
+  if (!digits) return undefined;
+  return digits.startsWith("0") ? digits.replace(/^0/, "62") : digits;
 }
 
 export function getCommunityTypeFromRuntime(runtime: {

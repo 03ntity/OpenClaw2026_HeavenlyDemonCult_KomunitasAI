@@ -1020,18 +1020,34 @@ async function classifyResetIntent(
   runtime: IAgentRuntime,
   userInput: string,
 ): Promise<ResetIntent> {
+  const lower = userInput.toLowerCase();
+
+  if (
+    lower.includes("batal") ||
+    lower.includes("cancel") ||
+    lower.includes("tidak jadi") ||
+    lower.includes("jangan")
+  )
+    return "cancel";
+
+  if (
+    lower.includes("semua") ||
+    lower.includes("all") ||
+    lower.includes("komunitas") ||
+    lower.includes("anggota")
+  )
+    return "confirm_all";
+
+  if (
+    lower.includes("transaksi") ||
+    lower.includes("invoice") ||
+    lower.includes("kas") ||
+    lower.includes("log")
+  )
+    return "confirm_transactions";
+
   const result = await (runtime as any).generateText({
-    context: `Klasifikasikan intent user berdasarkan input berikut.
-
-Input user: "${userInput}"
-
-Pilih SATU dari opsi berikut:
-- confirm_transactions: user mengkonfirmasi hapus data transaksi saja (invoice, kas, log) tapi anggota tetap
-- confirm_all: user mengkonfirmasi hapus SEMUA data termasuk anggota dan komunitas
-- cancel: user membatalkan atau tidak mau hapus
-- unknown: tidak jelas, perlu konfirmasi ulang
-
-Jawab HANYA dengan satu kata dari opsi di atas, tanpa penjelasan tambahan apapun.`,
+    context: `Klasifikasikan intent user. Input: "${userInput}". Pilih: confirm_transactions, confirm_all, cancel, atau unknown. Jawab SATU kata saja.`,
   });
 
   const trimmed = (result ?? "").trim().toLowerCase() as ResetIntent;

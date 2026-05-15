@@ -1,122 +1,71 @@
-# Project Starter
+# KomunitasAI
 
-This is the starter template for ElizaOS projects.
+Bendahara digital otomatis untuk komunitas Indonesia.
 
-## Features
+Pengelolaan keuangan untuk komunitas skala kecil seperti RT, arisan, koperasi, dan kas kelas sering kali menyita waktu. Pencatatan manual rentan terhadap kesalahan manusia. KomunitasAI hadir sebagai agen AI berbasis ElizaOS yang bertindak layaknya bendahara sungguhan. Sistem ini bekerja secara mandiri untuk mengotomatiskan penagihan, memantau pembayaran, dan membuat laporan keuangan.
 
-- Pre-configured project structure for ElizaOS development
-- Comprehensive testing setup with component and e2e tests
-- Default character configuration with plugin integration
-- Example service, action, and provider implementations
-- TypeScript configuration for optimal developer experience
-- Built-in documentation and examples
+## Fitur Utama
 
-## Getting Started
+- **Penagihan Otomatis:** Sistem membuat dan mendistribusikan tagihan iuran secara berkala kepada seluruh anggota.
+- **Pemantauan Pembayaran:** Pelacakan status pembayaran berjalan secara real-time melalui integrasi DOKU API.
+- **Pengingat Pintar:** Agen secara aktif mengirimkan pesan pengingat kepada anggota yang belum melunasi tagihan.
+- **Laporan Keuangan:** Pembuatan ringkasan pemasukan dan pengeluaran berjalan secara otomatis.
+- **Chat Agent:** Pengurus dan anggota dapat menanyakan informasi saldo atau status iuran melalui antarmuka percakapan natural.
 
-```bash
-# Create a new project
-elizaos create --type project my-project
-# Dependencies are automatically installed and built
+## Prerequisites
 
-# Navigate to the project directory
-cd my-project
+Pastikan Anda telah memasang kebutuhan berikut sebelum memulai:
 
-# Start development immediately
-elizaos dev
-```
+- Bun
+- PostgreSQL
+- Akun Sandbox DOKU
 
-## Development
+## Cara Install dan Jalankan
 
-```bash
-# Start development with hot-reloading (recommended)
-elizaos dev
+1. Salin file template environment:
 
-# OR start without hot-reloading
-elizaos start
-# Note: When using 'start', you need to rebuild after changes:
-# bun run build
+   ```bash
+   cp .env.example .env
+   ```
 
-# Test the project
-elizaos test
-```
+2. Buka file `.env` dan isi variabel `POSTGRES_URL` dengan alamat database PostgreSQL Anda.
 
-## Testing
+3. Masukkan kredensial dari akun Sandbox DOKU ke dalam file `.env`.
 
-ElizaOS employs a dual testing strategy:
+4. Unduh semua dependensi proyek:
 
-1. **Component Tests** (`src/__tests__/*.test.ts`)
+   ```bash
+   bun install
+   ```
 
-   - Run with Bun's native test runner
-   - Fast, isolated tests using mocks
-   - Perfect for TDD and component logic
+5. Mulai server dalam mode pengembangan:
+   ```bash
+   bun run dev
+   ```
 
-2. **E2E Tests** (`src/__tests__/e2e/*.e2e.ts`)
-   - Run with ElizaOS custom test runner
-   - Real runtime with actual database (PGLite)
-   - Test complete user scenarios
+## Cara Demo
 
-### Test Structure
+Ikuti panduan langkah demi langkah berikut untuk mendemonstrasikan kemampuan KomunitasAI:
 
-```
-src/
-  __tests__/              # All tests live inside src
-    *.test.ts            # Component tests (use Bun test runner)
-    e2e/                 # E2E tests (use ElizaOS test runner)
-      project-starter.e2e.ts  # E2E test suite
-      README.md          # E2E testing documentation
-  index.ts               # Export tests here: tests: [ProjectStarterTestSuite]
-```
+1. **Tambah Komunitas:** Buat profil entitas komunitas baru pada antarmuka sistem.
+2. **Tambah Anggota:** Masukkan data diri anggota komunitas yang akan menerima tagihan.
+3. **Tagih Iuran:** Perintahkan agen untuk membuat tagihan iuran.
+4. **Simulasi Bayar:** Buka halaman pembayaran dan gunakan akun DOKU sandbox untuk menyimulasikan transaksi sukses.
+5. **Cek Saldo:** Gunakan fitur chat untuk bertanya kepada agen mengenai total kas komunitas saat ini.
+6. **Generate Laporan:** Minta agen menyusun laporan keuangan terbaru.
 
-### Running Tests
+## Tech Stack
 
-- `elizaos test` - Run all tests (component + e2e)
-- `elizaos test component` - Run only component tests
-- `elizaos test e2e` - Run only E2E tests
+- ElizaOS
+- React
+- Tailwind CSS
+- PostgreSQL
+- DOKU API
 
-### Writing Tests
+## Tim
 
-Component tests use bun:test:
+HeavenlyDemonCult - OpenClaw Agenthon 2026
 
-```typescript
-// Unit test example (__tests__/config.test.ts)
-describe('Configuration', () => {
-  it('should load configuration correctly', () => {
-    expect(config.debug).toBeDefined();
-  });
-});
+## License
 
-// Integration test example (__tests__/integration.test.ts)
-describe('Integration: Plugin with Character', () => {
-  it('should initialize character with plugins', async () => {
-    // Test interactions between components
-  });
-});
-```
-
-E2E tests use ElizaOS test interface:
-
-```typescript
-// E2E test example (e2e/project.test.ts)
-export class ProjectTestSuite implements TestSuite {
-  name = 'project_test_suite';
-  tests = [
-    {
-      name: 'project_initialization',
-      fn: async (runtime) => {
-        // Test project in a real runtime
-      },
-    },
-  ];
-}
-
-export default new ProjectTestSuite();
-```
-
-The test utilities in `__tests__/utils/` provide helper functions to simplify writing tests.
-
-## Configuration
-
-Customize your project by modifying:
-
-- `src/index.ts` - Main entry point
-- `src/character.ts` - Character definition
+MIT License

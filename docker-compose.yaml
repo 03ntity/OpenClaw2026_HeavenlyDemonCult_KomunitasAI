@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 services:
   postgres:
     image: ankane/pgvector:latest
@@ -10,9 +10,9 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data:rw
     ports:
-      - '5432:5432'
+      - "5432:5432"
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -25,10 +25,23 @@ services:
     environment:
       # Core AI providers (at least one required)
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_SMALL_MODEL=${OPENROUTER_SMALL_MODEL:-}
+      - OPENROUTER_LARGE_MODEL=${OPENROUTER_LARGE_MODEL:-}
+      - OPENROUTER_EMBEDDING_MODEL=${OPENROUTER_EMBEDDING_MODEL:-}
+      - OPENROUTER_EMBEDDING_DIMENSIONS=${OPENROUTER_EMBEDDING_DIMENSIONS:-}
 
       # Database (required for production)
       - POSTGRES_URL=${POSTGRES_URL}
+
+      # DOKU MCP Payment Integration
+      - DOKU_CLIENT_ID=${DOKU_CLIENT_ID:-}
+      - DOKU_SECRET_KEY=${DOKU_SECRET_KEY:-}
+      - DOKU_MCP_API_KEY=${DOKU_MCP_API_KEY:-}
+      - DOKU_BASE_URL=${DOKU_BASE_URL:-https://api-sandbox.doku.com}
+      - APP_URL=${APP_URL:-}
 
       # Server configuration
       - SERVER_PORT=${SERVER_PORT:-3000}
@@ -36,28 +49,12 @@ services:
       - NODE_ENV=${NODE_ENV:-production}
       - LOG_LEVEL=${LOG_LEVEL:-info}
 
-      # Optional: Add these based on your plugins
-      # Discord
+      # Discord (optional)
       - DISCORD_APPLICATION_ID=${DISCORD_APPLICATION_ID:-}
       - DISCORD_API_TOKEN=${DISCORD_API_TOKEN:-}
 
-      # Solana
-      - SOLANA_PRIVATE_KEY=${SOLANA_PRIVATE_KEY:-}
-      - SOLANA_PUBLIC_KEY=${SOLANA_PUBLIC_KEY:-}
-      - BIRDEYE_API_KEY=${BIRDEYE_API_KEY:-}
-
-      # EVM
-      - EVM_CHAINS=${EVM_CHAINS:-}
-
-      # Voice/Audio
-      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
-      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-}
-
-      # Other AI providers
-      - REDPILL_API_KEY=${REDPILL_API_KEY:-}
     ports:
-      - '3000:3000'
-      - '50000-50100:50000-50100/udp'
+      - "3000:3000"
     depends_on:
       postgres:
         condition: service_healthy

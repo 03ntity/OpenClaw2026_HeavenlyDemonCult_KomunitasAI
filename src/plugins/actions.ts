@@ -25,13 +25,21 @@ const pendingResetConfirmations = new Map<
 const FIVE_MINUTES = 5 * 60 * 1000;
 
 function hasResetKeyword(text: string): boolean {
+  const lower = text.toLowerCase();
   return (
-    text.includes("hapus") ||
-    text.includes("reset") ||
-    text.includes("bersihkan") ||
-    text.includes("flush") ||
-    text.includes("clear") ||
-    text.includes("kosongkan")
+    lower.includes("hapus data") ||
+    lower.includes("hapus semua") ||
+    lower.includes("hapus transaksi") ||
+    lower.includes("reset data") ||
+    lower.includes("bersihkan data") ||
+    lower.includes("flush database") ||
+    lower.includes("clear data") ||
+    lower.includes("kosongkan data") ||
+    lower === "hapus" ||
+    lower === "reset" ||
+    lower === "bersihkan" ||
+    lower === "flush" ||
+    lower === "kosongkan"
   );
 }
 

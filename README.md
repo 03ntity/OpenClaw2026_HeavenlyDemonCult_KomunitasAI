@@ -23,8 +23,6 @@ Dengan 6 AI agent spesialis dan integrasi DOKU MCP yang mendukung 39 metode pemb
 
 ## Demo Flow (5 Menit)
 
-Ikuti langkah berikut untuk mendemonstrasikan KomunitasAI kepada juri:
-
 **Step 1: Buka Dashboard**
 
 ```

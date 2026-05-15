@@ -22,6 +22,19 @@ const pendingResetConfirmations = new Map<
   { communityId: string; ts: number }
 >();
 
+const FIVE_MINUTES = 5 * 60 * 1000;
+
+function hasResetKeyword(text: string): boolean {
+  return (
+    text.includes("hapus") ||
+    text.includes("reset") ||
+    text.includes("bersihkan") ||
+    text.includes("flush") ||
+    text.includes("clear") ||
+    text.includes("kosongkan")
+  );
+}
+
 // ── GET_ALL_MEMBERS ─────────────────────────────────────────────────────
 
 export const getAllMembersAction: Action = {
@@ -1071,7 +1084,17 @@ export const resetCommunityDataAction: Action = {
   ],
   description:
     "Resets community data after user confirmation. Uses LLM to interpret user intent before proceeding.",
-  validate: validateHasCommunity,
+  validate: async (runtime, message) => {
+    const hasCommunity = await validateHasCommunity(runtime);
+    if (!hasCommunity) return false;
+
+    const text = (message.content.text ?? "").toLowerCase();
+    const pendingKey = runtime.agentId;
+    const pending = pendingResetConfirmations.get(pendingKey);
+    const isStillPending = pending && Date.now() - pending.ts < FIVE_MINUTES;
+
+    return isStillPending || hasResetKeyword(text);
+  },
   handler: async (
     runtime,
     message,
@@ -1083,13 +1106,14 @@ export const resetCommunityDataAction: Action = {
     const community = await service.getCommunity();
     const input = (message.content.text ?? "").trim();
     const resetType = getStringOption(options, "type");
+    const text = input.toLowerCase();
+    const hasKeyword = hasResetKeyword(text);
 
     const pendingKey = `${runtime.agentId}`;
     const pending = pendingResetConfirmations.get(pendingKey);
-    const FIVE_MINUTES = 5 * 60 * 1000;
     const isStillPending = pending && Date.now() - pending.ts < FIVE_MINUTES;
 
-    if (!isStillPending && !resetType) {
+    if (!isStillPending && !hasKeyword) {
       const invoices = await service.listInvoices(community.id);
       const members = await service.listMembers(community.id);
       pendingResetConfirmations.set(pendingKey, {

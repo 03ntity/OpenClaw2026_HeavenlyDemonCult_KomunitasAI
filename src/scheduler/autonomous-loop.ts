@@ -5,6 +5,7 @@ import { KomunitasService } from "../plugins/komunitas-service.ts";
 const BILLING_TASK = "KOMUNITAS_BILLING_LOOP";
 const MONITORING_TASK = "KOMUNITAS_MONITORING_LOOP";
 const REPORT_TASK = "KOMUNITAS_REPORT_LOOP";
+export const COMMUNITY_WORKFLOW_TASK = "KOMUNITAS_COMMUNITY_WORKFLOW";
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const SIX_HOURS_MS = 6 * ONE_HOUR_MS;
@@ -129,10 +130,55 @@ export const reportTaskWorker: TaskWorker = {
   },
 };
 
+export const communityWorkflowTaskWorker: TaskWorker = {
+  name: COMMUNITY_WORKFLOW_TASK,
+  async execute(runtime, options, task) {
+    const service = await getService(runtime);
+    if (!service) return;
+
+    const communityId = String(
+      options.communityId ?? task.metadata?.communityId ?? "",
+    );
+    if (!communityId) {
+      logger.warn({ taskId: task.id }, "Community workflow task missing communityId");
+      return;
+    }
+
+    const result: Record<string, unknown> = {};
+    try {
+      result.billing = await service.bulkCreateInvoices({ communityId });
+    } catch (err) {
+      result.billingError = err instanceof Error ? err.message : String(err);
+      logger.warn({ communityId, err }, "Community workflow billing step failed");
+    }
+
+    try {
+      result.monitoring = await service.checkPendingPayments(communityId);
+    } catch (err) {
+      result.monitoringError = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        { communityId, err },
+        "Community workflow payment monitoring step failed",
+      );
+    }
+
+    try {
+      result.reminders = await service.sendPaymentReminders({ communityId });
+    } catch (err) {
+      result.reminderError = err instanceof Error ? err.message : String(err);
+      logger.warn({ communityId, err }, "Community workflow reminder step failed");
+    }
+
+    await service.recordScheduledWorkflowCompleted(communityId, result);
+    logger.info({ communityId, taskId: task.id }, "Community workflow task completed");
+  },
+};
+
 export async function startScheduler(runtime: IAgentRuntime): Promise<void> {
   runtime.registerTaskWorker(billingTaskWorker);
   runtime.registerTaskWorker(monitoringTaskWorker);
   runtime.registerTaskWorker(reportTaskWorker);
+  runtime.registerTaskWorker(communityWorkflowTaskWorker);
 
   const existingTasks = await runtime.getTasks({
     tags: ["komunitas-scheduler"],

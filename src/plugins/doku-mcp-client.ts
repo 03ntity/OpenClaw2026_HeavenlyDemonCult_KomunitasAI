@@ -37,6 +37,12 @@ type JsonRpcResponse = {
   error?: { code: number; message: string; data?: unknown };
 };
 
+export type DokuMcpToolDefinition = {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+};
+
 type DirectPaymentResult = {
   requestId: string;
   invoiceNumber: string;
@@ -58,17 +64,22 @@ export class DokuMcpClient {
   private readonly config: KomunitasConfig;
   private readonly mcpUrl: string;
   private readonly authHeader: string;
+  private protocolVersion: string | null = null;
+  private availableTools: Set<string> | null = null;
+  private toolDefinitions: DokuMcpToolDefinition[] = [];
+  private initializePromise: Promise<void> | null = null;
 
   constructor(config: KomunitasConfig) {
     this.config = config;
-    this.mcpUrl = MCP_SANDBOX_URL;
+    this.mcpUrl = config.DOKU_MCP_URL ?? buildMcpUrl(config.DOKU_BASE_URL);
     this.authHeader = this.buildAuthHeader();
   }
 
   get isConfigured(): boolean {
     return Boolean(
       this.config.DOKU_CLIENT_ID?.trim() &&
-      this.config.DOKU_MCP_API_KEY?.trim(),
+      (this.config.DOKU_AUTHORIZATION?.trim() ||
+        this.config.DOKU_MCP_API_KEY?.trim()),
     );
   }
 
@@ -92,7 +103,7 @@ export class DokuMcpClient {
       customerEmail: params.customerEmail ?? "",
     };
 
-    const raw = await this.callTool<{
+    const raw = await this.callToolWithFallback<{
       message?: string | string[];
       invoiceNumber?: string;
       response?: {
@@ -104,7 +115,7 @@ export class DokuMcpClient {
           expired_datetime?: string;
         };
       };
-    }>("create_doku_direct_checkout", toolRequest);
+    }>(["create_checkout_link", "create_payment_link"], toolRequest);
 
     logger.info(
       {
@@ -117,18 +128,24 @@ export class DokuMcpClient {
 
     const payment = raw?.response?.payment;
     const order = raw?.response?.order;
+    const paymentUrl = payment?.url ?? findStringDeep(raw, [/url/i]);
+    const invoiceNumber =
+      order?.invoice_number ??
+      raw?.invoiceNumber ??
+      findStringDeep(raw, [/invoice/i, /order.*number/i]) ??
+      params.invoiceNumber;
 
-    if (!payment?.url) {
+    if (!paymentUrl) {
       throw new Error(
         `DOKU MCP tidak mengembalikan payment URL. Response: ${JSON.stringify(raw).slice(0, 200)}`,
       );
     }
 
     return {
-      requestId: payment.token_id ?? randomUUID(),
-      invoiceNumber: order?.invoice_number ?? params.invoiceNumber,
-      paymentUrl: payment.url,
-      expiresAt: payment.expired_datetime,
+      requestId: payment?.token_id ?? randomUUID(),
+      invoiceNumber,
+      paymentUrl,
+      expiresAt: payment?.expired_datetime,
       raw,
     };
   }
@@ -194,6 +211,18 @@ export class DokuMcpClient {
       categories: Record<string, string[]>;
     }>("get_merchant_payment_methods", {});
     return raw;
+  }
+
+  async listTools(): Promise<DokuMcpToolDefinition[]> {
+    await this.initializeMcp();
+    return this.toolDefinitions;
+  }
+
+  async callRawTool<T = Record<string, unknown>>(
+    toolName: string,
+    toolRequest: Record<string, unknown> = {},
+  ): Promise<T> {
+    return this.callTool<T>(toolName, toolRequest);
   }
 
   // ── Customer Management ───────────────────────────────────────────────
@@ -299,7 +328,7 @@ export class DokuMcpClient {
   private assertConfigured() {
     if (!this.isConfigured) {
       throw new Error(
-        "DOKU MCP belum dikonfigurasi. Isi DOKU_CLIENT_ID dan DOKU_MCP_API_KEY di .env.",
+        "DOKU MCP belum dikonfigurasi. Isi DOKU_CLIENT_ID dan DOKU_AUTHORIZATION atau DOKU_MCP_API_KEY di .env.",
       );
     }
   }
@@ -311,40 +340,18 @@ export class DokuMcpClient {
     toolName: string,
     params: Record<string, unknown>,
   ): Promise<T> {
-    const body = JSON.stringify({
-      jsonrpc: "2.0",
-      id: Date.now(),
-      method: "tools/call",
-      params: {
-        name: toolName,
-        arguments: { toolRequest: JSON.stringify(params) },
-      },
-    });
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
-    let response: Response;
-
-    try {
-      response = await fetch(this.mcpUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Client-Id": this.config.DOKU_CLIENT_ID!,
-          Authorization: this.authHeader,
-          Accept: "application/json, text/event-stream",
-        },
-        body,
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timeoutId);
+    await this.initializeMcp();
+    if (this.availableTools && !this.availableTools.has(toolName)) {
+      throw new Error(`DOKU MCP tool tidak tersedia: ${toolName}`);
     }
 
-    const json: JsonRpcResponse = await response.json().catch(() => ({}));
+    const json = await this.callMcpRpc("tools/call", {
+      name: toolName,
+      arguments: { toolRequest: JSON.stringify(params) },
+    });
 
-    if (!response.ok || json.error) {
-      const msg = json.error?.message ?? `DOKU MCP error (${response.status})`;
+    if (json.error) {
+      const msg = json.error.message;
       const detail = json.error?.data ? JSON.stringify(json.error.data) : "";
       throw new Error(`${msg} ${detail}`.trim());
     }
@@ -396,12 +403,150 @@ export class DokuMcpClient {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
+  private async initializeMcp(): Promise<void> {
+    this.assertConfigured();
+    if (this.availableTools) return;
+    if (this.initializePromise) return this.initializePromise;
+
+    this.initializePromise = (async () => {
+      const initResult = await this.callMcpRpc<{
+        result?: {
+          protocolVersion?: string;
+          serverInfo?: { name?: string; version?: string };
+        };
+      }>("initialize", {}, 0);
+
+      if (initResult.error) {
+        throw new Error(initResult.error.message);
+      }
+
+      this.protocolVersion = initResult.result?.protocolVersion ?? null;
+      const serverInfo = initResult.result?.serverInfo;
+      logger.info(
+        {
+          mcpUrl: this.mcpUrl,
+          protocolVersion: this.protocolVersion,
+          serverName: serverInfo?.name,
+          serverVersion: serverInfo?.version,
+        },
+        "DOKU MCP initialized",
+      );
+
+      const toolsResult = await this.callMcpRpc<{
+        result?: { tools?: DokuMcpToolDefinition[] };
+      }>("tools/list", {}, 1);
+
+      if (toolsResult.error) {
+        throw new Error(toolsResult.error.message);
+      }
+
+      const tools = toolsResult.result?.tools ?? [];
+      this.toolDefinitions = tools;
+      this.availableTools = new Set(tools.map((tool) => tool.name));
+      logger.info(
+        { toolCount: tools.length, tools: tools.map((tool) => tool.name) },
+        "DOKU MCP tools loaded",
+      );
+    })();
+
+    try {
+      await this.initializePromise;
+    } catch (error) {
+      this.initializePromise = null;
+      throw error;
+    }
+  }
+
+  private async callMcpRpc<T = Record<string, unknown>>(
+    method: string,
+    params: Record<string, unknown>,
+    requestId = Date.now(),
+  ): Promise<JsonRpcResponse & T> {
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: requestId,
+      method,
+      params,
+    });
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    let response: Response;
+
+    try {
+      const headers: Record<string, string> = {
+        "client-id": this.config.DOKU_CLIENT_ID!,
+        authorization: this.authHeader,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      };
+      if (this.protocolVersion) {
+        headers["mcp-protocol-version"] = this.protocolVersion;
+      }
+
+      response = await fetch(this.mcpUrl, {
+        method: "POST",
+        headers,
+        body,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    const text = await response.text();
+    const json = parseJsonRpcResponse(text);
+
+    if (!response.ok) {
+      const detail = json.error?.message ?? text.slice(0, 300);
+      throw new Error(
+        `DOKU MCP RPC ${method} failed (${response.status}): ${detail}`,
+      );
+    }
+
+    return json as JsonRpcResponse & T;
+  }
+
   private buildAuthHeader(): string {
+    if (this.config.DOKU_AUTHORIZATION?.trim()) {
+      return this.config.DOKU_AUTHORIZATION.trim();
+    }
     const apiKey = this.config.DOKU_MCP_API_KEY;
     if (!apiKey) return "";
-    const encoded = btoa(`${apiKey}:`);
+    const encoded = Buffer.from(`${apiKey}:`).toString("base64");
     return `Basic ${encoded}`;
   }
+}
+
+function buildMcpUrl(baseUrl?: string): string {
+  if (!baseUrl) return MCP_SANDBOX_URL;
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  if (trimmed.endsWith("/mcp")) return trimmed;
+  if (trimmed.includes("doku-mcp-server")) return `${trimmed}/mcp`;
+  return `${trimmed}/doku-mcp-server/mcp`;
+}
+
+function parseJsonRpcResponse(text: string): JsonRpcResponse {
+  const trimmed = text.trim();
+  if (!trimmed) return {} as JsonRpcResponse;
+  if (trimmed.startsWith("{")) return JSON.parse(trimmed) as JsonRpcResponse;
+
+  const dataLines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim())
+    .filter((line) => line && line !== "[DONE]");
+
+  for (let i = dataLines.length - 1; i >= 0; i -= 1) {
+    try {
+      return JSON.parse(dataLines[i]) as JsonRpcResponse;
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error(`DOKU MCP response parse error: ${trimmed.slice(0, 200)}`);
 }
 
 /**

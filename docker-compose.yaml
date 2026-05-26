@@ -39,6 +39,8 @@ services:
       # DOKU MCP Payment Integration
       - DOKU_CLIENT_ID=${DOKU_CLIENT_ID:-}
       - DOKU_SECRET_KEY=${DOKU_SECRET_KEY:-}
+      - DOKU_AUTHORIZATION=${DOKU_AUTHORIZATION:-}
+      - DOKU_MCP_URL=${DOKU_MCP_URL:-https://api-sandbox.doku.com/doku-mcp-server/mcp}
       - DOKU_MCP_API_KEY=${DOKU_MCP_API_KEY:-}
       - DOKU_BASE_URL=${DOKU_BASE_URL:-https://api-sandbox.doku.com}
       - APP_URL=${APP_URL:-}

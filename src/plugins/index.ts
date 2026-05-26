@@ -18,6 +18,8 @@ const plugin: Plugin = {
     DOKU_CLIENT_ID: process.env.DOKU_CLIENT_ID,
     DOKU_SECRET_KEY: process.env.DOKU_SECRET_KEY,
     DOKU_MCP_API_KEY: process.env.DOKU_MCP_API_KEY,
+    DOKU_AUTHORIZATION: process.env.DOKU_AUTHORIZATION,
+    DOKU_MCP_URL: process.env.DOKU_MCP_URL,
     DOKU_BASE_URL: process.env.DOKU_BASE_URL || "https://api-sandbox.doku.com",
     APP_URL: process.env.APP_URL,
   },
@@ -26,6 +28,9 @@ const plugin: Plugin = {
       DOKU_CLIENT_ID: config.DOKU_CLIENT_ID || process.env.DOKU_CLIENT_ID,
       DOKU_SECRET_KEY: config.DOKU_SECRET_KEY || process.env.DOKU_SECRET_KEY,
       DOKU_MCP_API_KEY: config.DOKU_MCP_API_KEY || process.env.DOKU_MCP_API_KEY,
+      DOKU_AUTHORIZATION:
+        config.DOKU_AUTHORIZATION || process.env.DOKU_AUTHORIZATION,
+      DOKU_MCP_URL: config.DOKU_MCP_URL || process.env.DOKU_MCP_URL,
       DOKU_BASE_URL:
         config.DOKU_BASE_URL ||
         process.env.DOKU_BASE_URL ||
@@ -38,13 +43,19 @@ const plugin: Plugin = {
       process.env.DOKU_SECRET_KEY = validated.DOKU_SECRET_KEY;
     if (validated.DOKU_MCP_API_KEY)
       process.env.DOKU_MCP_API_KEY = validated.DOKU_MCP_API_KEY;
+    if (validated.DOKU_AUTHORIZATION)
+      process.env.DOKU_AUTHORIZATION = validated.DOKU_AUTHORIZATION;
+    if (validated.DOKU_MCP_URL)
+      process.env.DOKU_MCP_URL = validated.DOKU_MCP_URL;
     process.env.DOKU_BASE_URL = validated.DOKU_BASE_URL;
     if (validated.APP_URL) process.env.APP_URL = validated.APP_URL;
     logger.info(
       {
         dokuBaseUrl: validated.DOKU_BASE_URL,
+        dokuMcpUrl: validated.DOKU_MCP_URL,
         dokuConfigured: Boolean(
-          validated.DOKU_CLIENT_ID && validated.DOKU_MCP_API_KEY,
+          validated.DOKU_CLIENT_ID &&
+          (validated.DOKU_AUTHORIZATION || validated.DOKU_MCP_API_KEY),
         ),
       },
       "KomunitasAI plugin initialized",

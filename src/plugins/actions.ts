@@ -6,9 +6,11 @@ import type {
 } from "@elizaos/core";
 import { logger } from "@elizaos/core";
 import { getKomunitasService, KomunitasService } from "./komunitas-service.ts";
+import { COMMUNITY_WORKFLOW_TASK } from "../scheduler/autonomous-loop.ts";
 import {
   getKasEntryTypeOption,
   getNumberOption,
+  getOption,
   getStringOption,
   handleOnboardingError,
   validateHasCommunity,
@@ -26,13 +28,54 @@ const pendingResetConfirmations = new Map<
 
 const FIVE_MINUTES = 5 * 60 * 1000;
 
+async function upsertElizaWorkflowTask(
+  runtime: IAgentRuntime,
+  communityId: string,
+  intervalMs: number,
+) {
+  const taskTag = `community:${communityId}`;
+  const existing = await runtime.getTasks({
+    tags: ["komunitas-scheduler", "community-workflow", taskTag],
+  });
+  const task = {
+    name: COMMUNITY_WORKFLOW_TASK,
+    description: `Scheduled KomunitasAI workflow for community ${communityId}`,
+    tags: ["komunitas-scheduler", "community-workflow", taskTag, "repeat"],
+    metadata: {
+      updateInterval: intervalMs,
+      communityId,
+    },
+  };
+
+  if (existing[0]?.id) {
+    await runtime.updateTask(existing[0].id, task);
+    return existing[0].id;
+  }
+
+  return runtime.createTask(task);
+}
+
+async function deleteElizaWorkflowTasks(
+  runtime: IAgentRuntime,
+  communityId: string,
+) {
+  const taskTag = `community:${communityId}`;
+  const tasks = await runtime.getTasks({
+    tags: ["komunitas-scheduler", "community-workflow", taskTag],
+  });
+  for (const task of tasks) {
+    if (task.id) await runtime.deleteTask(task.id);
+  }
+  return tasks.length;
+}
+
 function getResetConfirmationKey(runtime: IAgentRuntime, message: Memory) {
   return `${runtime.agentId}-${message.roomId ?? "default"}`;
 }
 
-function getWorkflowRequester(message: Memory):
-  | { phone?: string; channel?: string }
-  | undefined {
+function getWorkflowRequester(
+  message: Memory,
+): { phone?: string; channel?: string } | undefined {
   const content = message.content as Record<string, any>;
   const metadataCandidates = [
     content?.metadata,
@@ -49,7 +92,9 @@ function getWorkflowRequester(message: Memory):
     if (phone) {
       return {
         phone,
-        channel: String(metadata?.source_type ?? metadata?.sourceType ?? "whatsapp"),
+        channel: String(
+          metadata?.source_type ?? metadata?.sourceType ?? "whatsapp",
+        ),
       };
     }
   }
@@ -91,6 +136,33 @@ function parseRupiahAmountFromText(text: string): number | undefined {
   }
 
   return undefined;
+}
+
+function getRecordOption(
+  options: unknown,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = getOption(options, key);
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function parseJsonObjectFromText(
+  text: string,
+): Record<string, unknown> | undefined {
+  const trimmed = text.trim();
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start === -1 || end <= start) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed.slice(start, end + 1));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function inferKasTypeFromText(text: string): "income" | "expense" | undefined {
@@ -1698,13 +1770,17 @@ Jawab HANYA dengan JSON: {"action":"set","intervalMs":60000} atau {"action":"can
 
     if (intent.action === "cancel") {
       await service.cancelWorkflowSchedule(community.id);
+      const deletedTaskCount = await deleteElizaWorkflowTasks(
+        runtime,
+        community.id,
+      );
       await sendCallback(
         callback,
         message,
         `✅ Jadwal workflow otomatis untuk komunitas "${community.name}" telah dihentikan.`,
         ["SET_WORKFLOW_SCHEDULE"],
       );
-      return { success: true, data: { cancelled: true } };
+      return { success: true, data: { cancelled: true, deletedTaskCount } };
     }
 
     const intervalMs = intent.intervalMs;
@@ -1720,6 +1796,11 @@ Jawab HANYA dengan JSON: {"action":"set","intervalMs":60000} atau {"action":"can
 
     await service.setWorkflowSchedule(community.id, intervalMs, requester);
     await service.rememberWorkflowRequester(community.id, requester);
+    const taskId = await upsertElizaWorkflowTask(
+      runtime,
+      community.id,
+      intervalMs,
+    );
 
     const humanInterval =
       intervalMs >= 86400000
@@ -1739,7 +1820,7 @@ Jawab HANYA dengan JSON: {"action":"set","intervalMs":60000} atau {"action":"can
     );
     return {
       success: true,
-      data: { intervalMs, communityId: community.id, schedule },
+      data: { intervalMs, communityId: community.id, schedule, taskId },
     };
   },
   examples: [
@@ -1769,9 +1850,148 @@ Jawab HANYA dengan JSON: {"action":"set","intervalMs":60000} atau {"action":"can
   ],
 };
 
+// ── Generic DOKU MCP Tools ──────────────────────────────────────────────
+
+export const listDokuMcpToolsAction: Action = {
+  name: "LIST_DOKU_MCP_TOOLS",
+  similes: ["SHOW_DOKU_MCP_TOOLS", "DAFTAR_TOOL_DOKU", "DOKU_TOOLS"],
+  description:
+    "Lists every DOKU MCP tool exposed by the merchant credentials through tools/list.",
+  validate: async (runtime) => {
+    const service = runtime.getService(
+      KomunitasService.serviceType,
+    ) as KomunitasService | null;
+    return Boolean(service?.isDokuConfigured());
+  },
+  handler: async (runtime, message, _state, _options, callback) => {
+    try {
+      const service = getKomunitasService(runtime);
+      const tools = await service.listDokuMcpTools();
+      const rows = tools.map(
+        (tool, index) =>
+          `${index + 1}. ${tool.name}${tool.description ? ` - ${tool.description}` : ""}`,
+      );
+      const text = rows.length
+        ? `DOKU MCP tools tersedia:\n${rows.join("\n")}`
+        : "DOKU MCP tidak mengembalikan daftar tools.";
+      await sendCallback(callback, message, text, ["LIST_DOKU_MCP_TOOLS"]);
+      return { success: true, text, data: { tools } };
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      await sendCallback(
+        callback,
+        message,
+        `Gagal mengambil daftar DOKU MCP tools: ${text}`,
+        ["LIST_DOKU_MCP_TOOLS"],
+      );
+      return {
+        success: false,
+        error: error instanceof Error ? error : new Error(text),
+      };
+    }
+  },
+  examples: [
+    [
+      { name: "{{name1}}", content: { text: "tampilkan semua tool DOKU MCP" } },
+      {
+        name: "{{name2}}",
+        content: {
+          text: "Aku ambil daftar tools dari DOKU MCP.",
+          actions: ["LIST_DOKU_MCP_TOOLS"],
+        },
+      },
+    ],
+  ],
+};
+
+export const callDokuMcpToolAction: Action = {
+  name: "CALL_DOKU_MCP_TOOL",
+  similes: ["DOKU_MCP_CALL", "CALL_DOKU_TOOL", "PANGGIL_TOOL_DOKU"],
+  description:
+    "Calls any DOKU MCP tool by name. Requires toolName and toolRequest options or a JSON object in the message.",
+  validate: async (runtime) => {
+    const service = runtime.getService(
+      KomunitasService.serviceType,
+    ) as KomunitasService | null;
+    return Boolean(service?.isDokuConfigured());
+  },
+  handler: async (runtime, message, _state, options, callback) => {
+    try {
+      const messageJson = parseJsonObjectFromText(
+        String(message.content.text ?? ""),
+      );
+      const toolName =
+        getStringOption(options, "toolName") ??
+        (typeof messageJson?.toolName === "string"
+          ? messageJson.toolName
+          : undefined) ??
+        (typeof messageJson?.name === "string" ? messageJson.name : undefined);
+
+      if (!toolName) {
+        throw new Error(
+          'toolName wajib diisi. Contoh: {"toolName":"get_merchant_payment_methods","toolRequest":{}}',
+        );
+      }
+
+      const toolRequest =
+        getRecordOption(options, "toolRequest") ??
+        getRecordOption(options, "arguments") ??
+        (messageJson?.toolRequest &&
+        typeof messageJson.toolRequest === "object" &&
+        !Array.isArray(messageJson.toolRequest)
+          ? (messageJson.toolRequest as Record<string, unknown>)
+          : undefined) ??
+        (messageJson?.arguments &&
+        typeof messageJson.arguments === "object" &&
+        !Array.isArray(messageJson.arguments)
+          ? (messageJson.arguments as Record<string, unknown>)
+          : undefined) ??
+        {};
+
+      const service = getKomunitasService(runtime);
+      const result = await service.callDokuMcpTool(toolName, toolRequest);
+      const preview = JSON.stringify(result, null, 2).slice(0, 1800);
+      const text = `DOKU MCP tool ${toolName} berhasil dipanggil.\n\n${preview}`;
+      await sendCallback(callback, message, text, ["CALL_DOKU_MCP_TOOL"]);
+      return { success: true, text, data: { toolName, toolRequest, result } };
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      await sendCallback(
+        callback,
+        message,
+        `Gagal memanggil DOKU MCP tool: ${text}`,
+        ["CALL_DOKU_MCP_TOOL"],
+      );
+      return {
+        success: false,
+        error: error instanceof Error ? error : new Error(text),
+      };
+    }
+  },
+  examples: [
+    [
+      {
+        name: "{{name1}}",
+        content: {
+          text: 'panggil DOKU MCP {"toolName":"get_merchant_payment_methods","toolRequest":{}}',
+        },
+      },
+      {
+        name: "{{name2}}",
+        content: {
+          text: "Aku panggil tool DOKU MCP yang diminta.",
+          actions: ["CALL_DOKU_MCP_TOOL"],
+        },
+      },
+    ],
+  ],
+};
+
 // ── Exported list ───────────────────────────────────────────────────────
 
 export const allActions: Action[] = [
+  listDokuMcpToolsAction,
+  callDokuMcpToolAction,
   getAllMembersAction,
   createPaymentLinkAction,
   createQrisBillAction,

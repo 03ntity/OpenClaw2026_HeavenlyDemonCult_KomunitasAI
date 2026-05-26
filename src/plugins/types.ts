@@ -110,6 +110,8 @@ export const configSchema = z.object({
   DOKU_CLIENT_ID: z.preprocess(emptyToUndefined, z.string().optional()),
   DOKU_SECRET_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
   DOKU_MCP_API_KEY: z.preprocess(emptyToUndefined, z.string().optional()),
+  DOKU_AUTHORIZATION: z.preprocess(emptyToUndefined, z.string().optional()),
+  DOKU_MCP_URL: z.preprocess(emptyToUndefined, z.string().url().optional()),
   DOKU_BASE_URL: z.preprocess(
     emptyToUndefined,
     z.string().url().default("https://api-sandbox.doku.com"),
@@ -122,6 +124,8 @@ export const loadKomunitasConfig = (): KomunitasConfig =>
     DOKU_CLIENT_ID: process.env.DOKU_CLIENT_ID,
     DOKU_SECRET_KEY: process.env.DOKU_SECRET_KEY,
     DOKU_MCP_API_KEY: process.env.DOKU_MCP_API_KEY,
+    DOKU_AUTHORIZATION: process.env.DOKU_AUTHORIZATION,
+    DOKU_MCP_URL: process.env.DOKU_MCP_URL,
     DOKU_BASE_URL: process.env.DOKU_BASE_URL || "https://api-sandbox.doku.com",
     APP_URL: process.env.APP_URL,
   });

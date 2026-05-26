@@ -317,6 +317,66 @@ export const charactersRoute = {
   },
 };
 
+export const dokuMcpToolsRoute = {
+  name: "doku-mcp-tools",
+  path: "/api/v1/doku-mcp/tools",
+  type: "GET" as const,
+  rawPath: true,
+  handler: async (_req: RouteRequest, res: RouteResponse, runtime: any) => {
+    try {
+      const service = getKomunitasService(runtime);
+      const tools = await service.listDokuMcpTools();
+      routeJson(res, { tools });
+    } catch (error) {
+      routeJson(
+        res,
+        { error: error instanceof Error ? error.message : String(error) },
+        400,
+      );
+    }
+  },
+};
+
+export const dokuMcpCallToolRoute = {
+  name: "doku-mcp-call-tool",
+  path: "/api/v1/doku-mcp/tools/call",
+  type: "POST" as const,
+  rawPath: true,
+  handler: async (req: RouteRequest, res: RouteResponse, runtime: any) => {
+    try {
+      const service = getKomunitasService(runtime);
+      const body = ((req as any).body ?? {}) as Record<string, unknown>;
+      const toolName =
+        typeof body.toolName === "string"
+          ? body.toolName
+          : typeof body.name === "string"
+            ? body.name
+            : "";
+      if (!toolName.trim()) {
+        return routeJson(res, { error: "toolName is required" }, 400);
+      }
+      const toolRequest =
+        body.toolRequest &&
+        typeof body.toolRequest === "object" &&
+        !Array.isArray(body.toolRequest)
+          ? (body.toolRequest as Record<string, unknown>)
+          : body.arguments &&
+              typeof body.arguments === "object" &&
+              !Array.isArray(body.arguments)
+            ? (body.arguments as Record<string, unknown>)
+            : {};
+      const result = await service.callDokuMcpTool(toolName, toolRequest);
+      routeJson(res, { toolName, toolRequest, result });
+    } catch (error) {
+      routeJson(
+        res,
+        { error: error instanceof Error ? error.message : String(error) },
+        400,
+      );
+    }
+  },
+};
+
 export const allRoutes = [
   summaryRoute,
   sendRemindersRoute,
@@ -331,6 +391,8 @@ export const allRoutes = [
   dokuWebhookRoute,
   wahaWebhookRoute,
   charactersRoute,
+  dokuMcpToolsRoute,
+  dokuMcpCallToolRoute,
 ];
 
 function extractWahaPhone(from: unknown): string {

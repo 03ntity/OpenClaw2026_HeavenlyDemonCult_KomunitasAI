@@ -125,9 +125,15 @@ const formatDate = (value?: string) => {
 };
 
 const apiBase = () => window.ELIZA_CONFIG?.apiBase?.replace(/\/$/, "") ?? "";
+const pluginApiBase = () => `${apiBase()}/komunitas-ai`;
+const isUuid = (value: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value,
+  );
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBase()}${path}`, {
+  const base = path.startsWith("/api/v1") ? pluginApiBase() : apiBase();
+  const response = await fetch(`${base}${path}`, {
     headers: { "Content-Type": "application/json", ...init?.headers },
     ...init,
   });
@@ -1263,47 +1269,235 @@ type ChatMessage = {
   role: "user" | "agent";
   text: string;
   ts: number;
+  pending?: boolean;
 };
 
 async function sendChatMessage(agentId: string, text: string): Promise<string> {
+  if (!isUuid(agentId)) {
+    throw new Error("Agent belum siap. Tunggu daftar agent selesai dimuat.");
+  }
+
   const base = apiBase();
-  const channelId = `dashboard-${agentId}`;
-  const response = await fetch(`${base}/api/messaging/submit`, {
+  const dashboardUserId = "11111111-1111-1111-1111-111111111111";
+  const submittedAt = Date.now();
+
+  const serverResponse = await fetch(`${base}/api/messaging/message-servers`);
+  const serverData = await serverResponse.json().catch(() => ({}));
+  const messageServerId =
+    serverData?.data?.messageServers?.[0]?.id ??
+    "00000000-0000-0000-0000-000000000000";
+
+  const channelResponse = await fetch(`${base}/api/messaging/channels`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      channel_id: channelId,
-      message_server_id: "00000000-0000-0000-0000-000000000000",
-      author_id: "dashboard-user",
-      content: text,
-      source_type: "user",
-      raw_message: { text },
-      metadata: { agentId },
+      name: `dashboard-${agentId}-${crypto.randomUUID()}`,
+      message_server_id: messageServerId,
+      participantCentralUserIds: [dashboardUserId],
+      type: "GROUP",
+      metadata: { dashboard: true, agentId },
     }),
   });
+  const channelData = await channelResponse.json().catch(() => ({}));
+  if (!channelResponse.ok) {
+    throw new Error(
+      channelData?.error?.message ??
+        channelData?.error ??
+        `Gagal membuat channel chat (${channelResponse.status})`,
+    );
+  }
+  const channelId = channelData?.data?.id;
+  if (!channelId) throw new Error("Channel chat tidak ditemukan.");
+
+  const addAgentResponse = await fetch(
+    `${base}/api/messaging/channels/${channelId}/agents`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId }),
+    },
+  );
+  const addAgentData = await addAgentResponse.json().catch(() => ({}));
+  if (!addAgentResponse.ok) {
+    throw new Error(
+      addAgentData?.error?.message ??
+        addAgentData?.error ??
+        `Gagal menambahkan agent ke channel (${addAgentResponse.status})`,
+    );
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  const response = await fetch(
+    `${base}/api/messaging/channels/${channelId}/messages`,
+    {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channelId,
+        message_server_id: messageServerId,
+        author_id: dashboardUserId,
+        content: text,
+        source_type: "dashboard",
+        metadata: {
+          dashboard: true,
+          agentId,
+          user_display_name: "Dashboard User",
+        },
+      }),
+    },
+  );
   const data = await response.json().catch(() => ({}));
-  if (data?.data?.id) {
-    await new Promise((r) => setTimeout(r, 2500));
-    const msgRes = await fetch(
-      `${base}/api/messaging/channels/${channelId}/messages?limit=5`,
-    ).catch(() => null);
-    if (msgRes?.ok) {
-      const msgData = await msgRes.json().catch(() => ({}));
-      const msgs: any[] = msgData?.data?.messages ?? msgData?.messages ?? [];
-      const agentMsg = msgs
-        .filter((m: any) => m.authorId === agentId || m.author_id === agentId)
-        .sort((a: any, b: any) => b.createdAt - a.createdAt)[0];
-      if (agentMsg?.content) return agentMsg.content;
+  if (response.ok) {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((r) => setTimeout(r, attempt < 2 ? 1500 : 2500));
+      const directReply = await fetchAgentReplyFromChannel(
+        base,
+        channelId,
+        agentId,
+        submittedAt,
+      );
+      if (directReply) return directReply;
+
+      const fallbackReply = await fetchLatestAgentReplyFromAnyChannel(
+        base,
+        agentId,
+        submittedAt,
+      );
+      if (fallbackReply) return fallbackReply;
     }
   }
   if (data?.error)
     return `Error: ${typeof data.error === "string" ? data.error : JSON.stringify(data.error)}`;
-  return "Pesan terkirim. Tunggu respons agent di chat utama.";
+  return "Pesan sudah dikirim, tapi respons agent belum muncul di widget ini. Cek chat utama atau coba lagi beberapa saat lagi.";
+}
+
+async function fetchAgentReplyFromChannel(
+  base: string,
+  channelId: string,
+  agentId: string,
+  submittedAt: number,
+): Promise<string | null> {
+  const msgRes = await fetch(
+    `${base}/api/messaging/channels/${channelId}/messages?limit=20`,
+  ).catch(() => null);
+  if (!msgRes?.ok) return null;
+  const msgData = await msgRes.json().catch(() => ({}));
+  const msgs: any[] = msgData?.data?.messages ?? msgData?.messages ?? [];
+  return pickLatestAgentMessage(msgs, agentId, submittedAt);
+}
+
+async function fetchLatestAgentReplyFromAnyChannel(
+  base: string,
+  agentId: string,
+  submittedAt: number,
+): Promise<string | null> {
+  const channelsRes = await fetch(
+    `${base}/api/messaging/message-servers/00000000-0000-0000-0000-000000000000/channels`,
+  ).catch(() => null);
+  if (!channelsRes?.ok) return null;
+  const channelsData = await channelsRes.json().catch(() => ({}));
+  const channels: any[] =
+    channelsData?.data?.channels ?? channelsData?.channels ?? [];
+  const candidates = channels
+    .filter((channel) => {
+      const metadata = channel.metadata ?? {};
+      return (
+        metadata.forAgent === agentId ||
+        metadata.agentId === agentId ||
+        channel.type === "DM"
+      );
+    })
+    .sort(
+      (a, b) =>
+        Date.parse(b.updatedAt ?? b.updated_at ?? b.createdAt ?? 0) -
+        Date.parse(a.updatedAt ?? a.updated_at ?? a.createdAt ?? 0),
+    )
+    .slice(0, 5);
+
+  for (const channel of candidates) {
+    const reply = await fetchAgentReplyFromChannel(
+      base,
+      channel.id,
+      agentId,
+      submittedAt,
+    );
+    if (reply) return reply;
+  }
+
+  return null;
+}
+
+function pickLatestAgentMessage(
+  msgs: any[],
+  agentId: string,
+  submittedAt: number,
+): string | null {
+  const agentMsg = msgs
+    .filter((m: any) => {
+      const author = m.authorId ?? m.author_id;
+      const createdAt = getMessageTimestamp(m);
+      const isRecent = !createdAt || createdAt >= submittedAt - 1000;
+      return author === agentId && isRecent;
+    })
+    .sort((a: any, b: any) => getMessageTimestamp(b) - getMessageTimestamp(a))[0];
+  const content =
+    typeof agentMsg?.content === "string"
+      ? agentMsg.content
+      : (agentMsg?.content?.text ?? agentMsg?.text);
+  return content ? String(content) : null;
+}
+
+function getMessageTimestamp(message: any) {
+  const raw =
+    message.created_at ?? message.createdAt ?? message.timestamp ?? 0;
+  if (typeof raw === "number") return raw;
+  const parsed = Date.parse(String(raw));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getThinkingText(input: string) {
+  const lower = input.toLowerCase();
+  if (
+    lower.includes("qris") ||
+    lower.includes("tagih") ||
+    lower.includes("invoice") ||
+    lower.includes("payment") ||
+    lower.includes("bank transfer") ||
+    lower.includes("va")
+  ) {
+    return "BendaharaAI sedang membuat tagihan dan menyiapkan pengiriman WhatsApp...";
+  }
+  if (
+    lower.includes("workflow") ||
+    lower.includes("jadwal") ||
+    lower.includes("otomatis")
+  ) {
+    return "BendaharaAI sedang menyiapkan workflow otomatis...";
+  }
+  if (
+    lower.includes("laporan") ||
+    lower.includes("report") ||
+    lower.includes("saldo") ||
+    lower.includes("kas")
+  ) {
+    return "BendaharaAI sedang membaca data kas dan menyusun jawaban...";
+  }
+  if (
+    lower.includes("anggota") ||
+    lower.includes("member") ||
+    lower.includes("peserta")
+  ) {
+    return "BendaharaAI sedang mengambil data anggota...";
+  }
+  return "BendaharaAI sedang berpikir dan memproses permintaan...";
 }
 
 function ChatWidget() {
   const [agentId, setAgentId] = React.useState<string>(
-    window.ELIZA_CONFIG?.agentId ?? "",
+    isUuid(window.ELIZA_CONFIG?.agentId ?? "")
+      ? (window.ELIZA_CONFIG?.agentId ?? "")
+      : "",
   );
   const [agentName, setAgentName] = React.useState<string>("BendaharaAI");
   const [open, setOpen] = React.useState(false);
@@ -1318,6 +1512,7 @@ function ChatWidget() {
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const bottomRef = React.useRef<HTMLDivElement>(null);
+  const agentReady = isUuid(agentId);
 
   React.useEffect(() => {
     const fetchAgents = async () => {
@@ -1325,7 +1520,7 @@ function ChatWidget() {
         const res = await fetch(`${apiBase()}/api/agents`);
         const data = await res.json();
         const agents: Array<{ id: string; name: string }> =
-          data?.data ?? data?.agents ?? [];
+          data?.data?.agents ?? data?.data ?? data?.agents ?? [];
         if (agents.length > 0) {
           const preferred =
             agents.find(
@@ -1344,7 +1539,17 @@ function ChatWidget() {
             },
           ]);
         }
-      } catch {}
+      } catch {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: randomId(),
+            role: "agent",
+            text: "Belum bisa memuat daftar agent. Pastikan ElizaOS berjalan di localhost:3000.",
+            ts: Date.now(),
+          },
+        ]);
+      }
     };
     fetchAgents();
   }, []);
@@ -1353,34 +1558,68 @@ function ChatWidget() {
     if (open) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, open]);
 
+  React.useEffect(() => {
+    if (!sending) return;
+    const labels = [
+      "BendaharaAI sedang memproses...",
+      "Mengambil konteks komunitas...",
+      "Menjalankan action yang sesuai...",
+      "Menunggu respons agent...",
+    ];
+    let index = 0;
+    const timer = window.setInterval(() => {
+      index = Math.min(index + 1, labels.length - 1);
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.pending ? { ...msg, text: labels[index] } : msg,
+        ),
+      );
+    }, 3500);
+    return () => window.clearInterval(timer);
+  }, [sending]);
+
   const send = async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text || sending || !agentReady) return;
     setInput("");
+    const pendingId = randomId();
     const userMsg: ChatMessage = {
       id: randomId(),
       role: "user",
       text,
       ts: Date.now(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+    const pendingMsg: ChatMessage = {
+      id: pendingId,
+      role: "agent",
+      text: getThinkingText(text),
+      ts: Date.now(),
+      pending: true,
+    };
+    setMessages((prev) => [...prev, userMsg, pendingMsg]);
     setSending(true);
     try {
       const reply = await sendChatMessage(agentId, text);
-      setMessages((prev) => [
-        ...prev,
-        { id: randomId(), role: "agent", text: reply, ts: Date.now() },
-      ]);
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === pendingId
+            ? { id: msg.id, role: "agent", text: reply, ts: Date.now() }
+            : msg,
+        ),
+      );
     } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: randomId(),
-          role: "agent",
-          text: "Gagal menghubungi agent. Pastikan server berjalan.",
-          ts: Date.now(),
-        },
-      ]);
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === pendingId
+            ? {
+                id: msg.id,
+                role: "agent",
+                text: "Gagal menghubungi agent. Pastikan server berjalan.",
+                ts: Date.now(),
+              }
+            : msg,
+        ),
+      );
     } finally {
       setSending(false);
     }
@@ -1448,10 +1687,10 @@ function ChatWidget() {
             </div>
             <div>
               <div className="text-sm font-semibold text-white">
-                BendaharaAI
+                {agentName}
               </div>
               <div className="text-xs text-white/70">
-                Bendahara digital komunitas
+                {agentReady ? "Bendahara digital komunitas" : "Memuat agent..."}
               </div>
             </div>
           </div>
@@ -1466,20 +1705,17 @@ function ChatWidget() {
                   className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm leading-relaxed ${
                     msg.role === "user"
                       ? "bg-[#255f85] text-white rounded-br-sm"
-                      : "bg-[#f2f5f8] text-[#172033] rounded-bl-sm"
+                      : msg.pending
+                        ? "bg-[#eef5fb] text-[#255f85] rounded-bl-sm"
+                        : "bg-[#f2f5f8] text-[#172033] rounded-bl-sm"
                   }`}
                 >
-                  {msg.text}
+                  <span className={msg.pending ? "animate-pulse" : ""}>
+                    {msg.text}
+                  </span>
                 </div>
               </div>
             ))}
-            {sending && (
-              <div className="flex justify-start">
-                <div className="rounded-2xl rounded-bl-sm bg-[#f2f5f8] px-3 py-2 text-sm text-[#657086]">
-                  <span className="animate-pulse">Mengetik...</span>
-                </div>
-              </div>
-            )}
             <div ref={bottomRef} />
           </div>
 
@@ -1491,14 +1727,18 @@ function ChatWidget() {
                 disabled={sending}
                 onKeyDown={onKey}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Tanya tentang kas, iuran, invoice..."
+                placeholder={
+                  agentReady
+                    ? "Tanya tentang kas, iuran, invoice..."
+                    : "Menunggu agent siap..."
+                }
                 type="text"
                 value={input}
               />
               <button
                 aria-label="Kirim pesan"
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#255f85] text-white transition hover:bg-[#1f5272] disabled:opacity-50"
-                disabled={sending || !input.trim()}
+                disabled={sending || !input.trim() || !agentReady}
                 onClick={() => void send()}
                 type="button"
               >

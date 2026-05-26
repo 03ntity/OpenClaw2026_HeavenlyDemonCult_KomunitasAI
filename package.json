@@ -45,6 +45,7 @@
     "zod": "^4.3.5"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.0",
     "@types/pg": "^8.20.0",
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.0.4",
@@ -56,6 +57,7 @@
   "scripts": {
     "start": "elizaos start",
     "dev": "elizaos dev",
+    "dev:frontend": "vite --host 0.0.0.0",
     "build": "bun run build.ts",
     "lint": "prettier --write ./src",
     "type-check": "tsc --noEmit",

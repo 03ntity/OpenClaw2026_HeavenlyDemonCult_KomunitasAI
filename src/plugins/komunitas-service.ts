@@ -34,11 +34,6 @@ export class KomunitasService extends Service {
   private readonly komunitasConfig: KomunitasConfig;
   private readonly doku: DokuMcpClient;
   readonly wahaClient: WahaClient;
-  private readonly schedulerTimers = new Map<
-    string,
-    ReturnType<typeof setInterval>
-  >();
-  private readonly schedulerRunning = new Set<string>();
 
   constructor(
     runtime?: IAgentRuntime,
@@ -54,7 +49,6 @@ export class KomunitasService extends Service {
     logger.info("Starting KomunitasAI service");
     const service = new KomunitasService(runtime, loadKomunitasConfig());
     await service.initDb();
-    await service.startAllSchedulers();
     return service;
   }
 
@@ -72,78 +66,6 @@ export class KomunitasService extends Service {
 
   async stop() {
     logger.info("Stopping KomunitasAI service");
-    for (const [communityId, timer] of this.schedulerTimers) {
-      clearInterval(timer);
-      this.schedulerTimers.delete(communityId);
-    }
-  }
-
-  async startAllSchedulers() {
-    try {
-      const schedules = await db.listActiveWorkflowSchedules();
-      for (const schedule of schedules) {
-        this.startSchedulerForCommunity(
-          schedule.community_id,
-          schedule.interval_ms,
-        );
-      }
-      logger.info({ count: schedules.length }, "Workflow schedulers started");
-    } catch (err) {
-      logger.warn({ err }, "Failed to load workflow schedules from DB");
-    }
-  }
-
-  startSchedulerForCommunity(communityId: string, intervalMs: number) {
-    if (this.schedulerTimers.has(communityId)) {
-      clearInterval(this.schedulerTimers.get(communityId)!);
-      this.schedulerTimers.delete(communityId);
-    }
-    const timer = setInterval(async () => {
-      if (this.schedulerRunning.has(communityId)) {
-        logger.warn(
-          { communityId },
-          "Scheduler skipped — previous run still in progress",
-        );
-        return;
-      }
-      this.schedulerRunning.add(communityId);
-      try {
-        logger.info({ communityId }, "Running scheduled workflow");
-        const result: Record<string, unknown> = {};
-        try {
-          result.billing = await this.bulkCreateInvoices({ communityId });
-        } catch (err) {
-          result.billingError =
-            err instanceof Error ? err.message : String(err);
-          logger.warn({ communityId, err }, "Scheduled billing step failed");
-        }
-        try {
-          result.monitoring = await this.checkPendingPayments(communityId);
-        } catch (err) {
-          result.monitoringError =
-            err instanceof Error ? err.message : String(err);
-          logger.warn(
-            { communityId, err },
-            "Scheduled payment monitoring step failed",
-          );
-        }
-        try {
-          result.reminders = await this.sendPaymentReminders({ communityId });
-        } catch (err) {
-          result.reminderError =
-            err instanceof Error ? err.message : String(err);
-          logger.warn({ communityId, err }, "Scheduled reminder step failed");
-        }
-        await db.updateNextRunAt(communityId);
-        await this.log(communityId, "scheduled_workflow_completed", result);
-      } catch (err) {
-        logger.warn({ communityId, err }, "Scheduled workflow failed");
-      } finally {
-        this.schedulerRunning.delete(communityId);
-      }
-    }, intervalMs);
-    this.schedulerTimers.set(communityId, timer);
-    logger.info({ communityId, intervalMs }, "Scheduler started for community");
   }
 
   async setWorkflowSchedule(
@@ -158,19 +80,23 @@ export class KomunitasService extends Service {
       requesterPhone: requester?.phone,
       requesterChannel: requester?.channel,
     });
-    this.startSchedulerForCommunity(communityId, intervalMs);
   }
 
   async cancelWorkflowSchedule(communityId: string): Promise<void> {
     await db.deactivateWorkflowSchedule(communityId);
-    if (this.schedulerTimers.has(communityId)) {
-      clearInterval(this.schedulerTimers.get(communityId)!);
-      this.schedulerTimers.delete(communityId);
-    }
   }
 
-  getSchedulerStatus(communityId: string): boolean {
-    return this.schedulerTimers.has(communityId);
+  async getSchedulerStatus(communityId: string): Promise<boolean> {
+    const schedule = await db.getWorkflowSchedule(communityId);
+    return Boolean(schedule?.is_active);
+  }
+
+  async recordScheduledWorkflowCompleted(
+    communityId: string,
+    result: Record<string, unknown>,
+  ): Promise<void> {
+    await db.updateNextRunAt(communityId);
+    await this.log(communityId, "scheduled_workflow_completed", result);
   }
 
   async rememberWorkflowRequester(
@@ -186,6 +112,17 @@ export class KomunitasService extends Service {
 
   isDokuConfigured() {
     return this.doku.isConfigured;
+  }
+
+  async listDokuMcpTools() {
+    return this.doku.listTools();
+  }
+
+  async callDokuMcpTool(
+    toolName: string,
+    toolRequest: Record<string, unknown> = {},
+  ) {
+    return this.doku.callRawTool(toolName, toolRequest);
   }
 
   // ── Read methods ──────────────────────────────────────────────────────
@@ -1099,10 +1036,12 @@ const sanitizeInvoiceNumberLocal = (value: string) =>
   value.replace(/[^A-Za-z0-9]/g, "").slice(0, 30);
 
 const getAdminWhatsAppPhones = () =>
-  (process.env.KOMUNITAS_ADMIN_WHATSAPP ||
+  (
+    process.env.KOMUNITAS_ADMIN_WHATSAPP ||
     process.env.KOMUNITAS_ADMIN_WHATSAPP_NUMBERS ||
     process.env.ADMIN_WHATSAPP_PHONE ||
-    "")
+    ""
+  )
     .split(",")
     .map((phone) => phone.trim())
     .filter(Boolean);

@@ -82,11 +82,43 @@ describe("Plugin Configuration Schema", () => {
     expect(process.env.DOKU_MCP_API_KEY).toBe("doku_key_test_abc123");
   });
 
+  it("should set DOKU_AUTHORIZATION env from config", async () => {
+    delete process.env.DOKU_AUTHORIZATION;
+    await plugin.init?.({
+      DOKU_AUTHORIZATION: "Basic ZG9rdV9rZXk6",
+      DOKU_BASE_URL: "https://api-sandbox.doku.com",
+    });
+    expect(process.env.DOKU_AUTHORIZATION).toBe("Basic ZG9rdV9rZXk6");
+  });
+
+  it("should set DOKU_MCP_URL env from config", async () => {
+    delete process.env.DOKU_MCP_URL;
+    await plugin.init?.({
+      DOKU_MCP_URL: "https://api-sandbox.doku.com/doku-mcp-server/mcp",
+      DOKU_BASE_URL: "https://api-sandbox.doku.com",
+    });
+    expect(process.env.DOKU_MCP_URL).toBe(
+      "https://api-sandbox.doku.com/doku-mcp-server/mcp",
+    );
+  });
+
   it("should reject invalid DOKU_BASE_URL", async () => {
     let error: Error | null = null;
     try {
       await plugin.init?.({
         DOKU_BASE_URL: "not-a-valid-url",
+      });
+    } catch (e) {
+      error = e as Error;
+    }
+    expect(error).not.toBeNull();
+  });
+
+  it("should reject invalid DOKU_MCP_URL", async () => {
+    let error: Error | null = null;
+    try {
+      await plugin.init?.({
+        DOKU_MCP_URL: "not-a-valid-url",
       });
     } catch (e) {
       error = e as Error;

@@ -10,8 +10,8 @@ import {
   type State,
   ChannelType,
   logger,
-} from '@elizaos/core';
-import { v4 as uuidv4 } from 'uuid';
+} from "@elizaos/core";
+import { v4 as uuidv4 } from "uuid";
 
 /**
  * E2E (End-to-End) Test Suite for ElizaOS Project Starter
@@ -98,25 +98,25 @@ interface TestSuite {
  * - Plugin system
  */
 export const ProjectStarterTestSuite: TestSuite = {
-  name: 'Project Starter E2E Tests',
+  name: "Project Starter E2E Tests",
   tests: [
     // ===== Core Project Tests =====
     {
-      name: 'project_should_initialize_correctly',
+      name: "project_should_initialize_correctly",
       fn: async (runtime: IAgentRuntime) => {
         // Verify runtime is initialized
         if (!runtime) {
-          throw new Error('Runtime is not initialized');
+          throw new Error("Runtime is not initialized");
         }
 
         // Check agent ID
         if (!runtime.agentId) {
-          throw new Error('Agent ID is not set');
+          throw new Error("Agent ID is not set");
         }
 
         // Verify character is loaded
         if (!runtime.character) {
-          throw new Error('Character is not loaded');
+          throw new Error("Character is not loaded");
         }
 
         logger.info(`✓ Project initialized with agent ID: ${runtime.agentId}`);
@@ -124,24 +124,27 @@ export const ProjectStarterTestSuite: TestSuite = {
     },
 
     {
-      name: 'character_should_be_loaded_correctly',
+      name: "character_should_be_loaded_correctly",
       fn: async (runtime: IAgentRuntime) => {
         const character = runtime.character;
 
         // Verify character has required fields
         if (!character.name) {
-          throw new Error('Character name is missing');
+          throw new Error("Character name is missing");
         }
 
         if (!character.bio || character.bio.length === 0) {
-          throw new Error('Character bio is missing or empty');
+          throw new Error("Character bio is missing or empty");
         }
 
         // Lore is optional in Character type
         // Skip lore check as it's not a required field
 
-        if (!character.messageExamples || character.messageExamples.length === 0) {
-          throw new Error('Character messageExamples are missing or empty');
+        if (
+          !character.messageExamples ||
+          character.messageExamples.length === 0
+        ) {
+          throw new Error("Character messageExamples are missing or empty");
         }
 
         // Topics and adjectives are optional
@@ -155,21 +158,23 @@ export const ProjectStarterTestSuite: TestSuite = {
 
         // Check settings object
         if (!character.settings) {
-          throw new Error('Character settings are missing');
+          throw new Error("Character settings are missing");
         }
 
         // Verify plugins array exists (may be empty)
         if (!Array.isArray(character.plugins)) {
-          throw new Error('Character plugins is not an array');
+          throw new Error("Character plugins is not an array");
         }
 
-        logger.info(`✓ Character "${character.name}" loaded successfully with all required fields`);
+        logger.info(
+          `✓ Character "${character.name}" loaded successfully with all required fields`,
+        );
       },
     },
 
     // ===== Natural Language Processing Tests =====
     {
-      name: 'agent_should_respond_to_greeting',
+      name: "agent_should_respond_to_greeting",
       fn: async (runtime: IAgentRuntime) => {
         // Create a simple test to verify agent can process messages
         // Note: In a real E2E test environment, the agent might not have
@@ -178,16 +183,17 @@ export const ProjectStarterTestSuite: TestSuite = {
 
         const testRoomId = uuidv4() as UUID;
         const testUserId = uuidv4() as UUID;
+        const testWorldId = uuidv4() as UUID;
 
         try {
           // Ensure connections exist
           await runtime.ensureConnection({
             entityId: testUserId,
             roomId: testRoomId,
-            userName: 'TestUser',
-            name: 'TestUser',
-            source: 'test',
-            worldId: uuidv4() as UUID,
+            userName: "TestUser",
+            name: "TestUser",
+            source: "test",
+            worldId: testWorldId,
             type: ChannelType.DM,
           });
 
@@ -197,8 +203,9 @@ export const ProjectStarterTestSuite: TestSuite = {
             entityId: testUserId,
             agentId: runtime.agentId,
             roomId: testRoomId,
+            worldId: testWorldId,
             content: {
-              text: 'Hello! How are you?',
+              text: "Hello! How are you?",
               action: null,
             } as Content,
             createdAt: Date.now(),
@@ -206,40 +213,44 @@ export const ProjectStarterTestSuite: TestSuite = {
           };
 
           // Store the message
-          await runtime.createMemory(userMessage, 'messages', false);
+          await runtime.createMemory(userMessage, "messages", false);
 
           // In a real scenario with an LLM, we would process the message
           // For now, we just verify the system can handle it
-          logger.info('✓ Agent can receive and store messages');
+          logger.info("✓ Agent can receive and store messages");
         } catch (error) {
           // If connection setup fails, it's a test environment limitation
-          logger.info('⚠ Message processing test skipped (test environment limitation)');
+          logger.info(
+            "⚠ Message processing test skipped (test environment limitation)",
+          );
         }
       },
     },
 
     {
-      name: 'agent_should_respond_to_hello_world',
+      name: "agent_should_respond_to_hello_world",
       fn: async (runtime: IAgentRuntime) => {
         // Test for specific hello world response
         // This requires the HELLO_WORLD action to be available
 
-        const helloWorldAction = runtime.actions.find((a: Action) => a.name === 'HELLO_WORLD');
+        const helloWorldAction = runtime.actions.find(
+          (a: Action) => a.name === "HELLO_WORLD",
+        );
 
         if (!helloWorldAction) {
-          logger.info('⚠ HELLO_WORLD action not found, skipping test');
+          logger.info("⚠ HELLO_WORLD action not found, skipping test");
           return;
         }
 
-        logger.info('✓ HELLO_WORLD action is available');
+        logger.info("✓ HELLO_WORLD action is available");
       },
     },
 
     {
-      name: 'agent_should_respond_to_casual_greetings',
+      name: "agent_should_respond_to_casual_greetings",
       fn: async (runtime: IAgentRuntime) => {
         // Test various casual greetings
-        const greetings = ['hey there!', 'hi!', 'hello', "what's up?", 'howdy'];
+        const greetings = ["hey there!", "hi!", "hello", "what's up?", "howdy"];
 
         // Just verify we can create messages with different greetings
         for (const greeting of greetings) {
@@ -258,45 +269,54 @@ export const ProjectStarterTestSuite: TestSuite = {
 
           // Verify message structure is valid
           if (!message.content.text) {
-            throw new Error(`Invalid message created for greeting: ${greeting}`);
+            throw new Error(
+              `Invalid message created for greeting: ${greeting}`,
+            );
           }
         }
 
-        logger.info('✓ Can handle various greeting formats');
+        logger.info("✓ Can handle various greeting formats");
       },
     },
 
     {
-      name: 'agent_should_maintain_conversation_context',
+      name: "agent_should_maintain_conversation_context",
       fn: async (runtime: IAgentRuntime) => {
         // Test that the agent can maintain context across messages
         try {
           const testRoomId = uuidv4() as UUID;
           const testUserId = uuidv4() as UUID;
+          const testWorldId = uuidv4() as UUID;
 
           // Create a context provider state
           const state: State = {
             values: {},
             data: { conversationContext: true },
-            text: 'Testing conversation context',
+            text: "Testing conversation context",
           };
 
-          logger.info('✓ Conversation context system is available');
+          logger.info("✓ Conversation context system is available");
         } catch (error) {
-          logger.info('⚠ Conversation context test skipped (test environment limitation)');
+          logger.info(
+            "⚠ Conversation context test skipped (test environment limitation)",
+          );
         }
       },
     },
 
     // ===== Action & Provider Tests =====
     {
-      name: 'hello_world_action_direct_execution',
+      name: "hello_world_action_direct_execution",
       fn: async (runtime: IAgentRuntime) => {
         // Test direct action execution if available
-        const helloWorldAction = runtime.actions.find((a: Action) => a.name === 'HELLO_WORLD');
+        const helloWorldAction = runtime.actions.find(
+          (a: Action) => a.name === "HELLO_WORLD",
+        );
 
         if (!helloWorldAction) {
-          logger.info('⚠ HELLO_WORLD action not found, skipping direct execution test');
+          logger.info(
+            "⚠ HELLO_WORLD action not found, skipping direct execution test",
+          );
           return;
         }
 
@@ -307,8 +327,8 @@ export const ProjectStarterTestSuite: TestSuite = {
           agentId: runtime.agentId,
           roomId: uuidv4() as UUID,
           content: {
-            text: 'test',
-            action: 'HELLO_WORLD',
+            text: "test",
+            action: "HELLO_WORLD",
           } as Content,
           createdAt: Date.now(),
           embedding: [],
@@ -317,48 +337,62 @@ export const ProjectStarterTestSuite: TestSuite = {
         const state: State = {
           values: {},
           data: {},
-          text: '',
+          text: "",
         };
 
         let responseReceived = false;
         const callback: HandlerCallback = async (
           response: Content,
-          files?: any
+          files?: any,
         ): Promise<Memory[]> => {
-          if (response.text === 'hello world!' && response.action === 'HELLO_WORLD') {
+          if (
+            response.text === "hello world!" &&
+            response.action === "HELLO_WORLD"
+          ) {
             responseReceived = true;
           }
           return [];
         };
 
         // Try direct action execution
-        await helloWorldAction.handler(runtime, message, state, {}, callback, []);
+        await helloWorldAction.handler(
+          runtime,
+          message,
+          state,
+          {},
+          callback,
+          [],
+        );
 
         if (!responseReceived) {
-          throw new Error('HELLO_WORLD action did not produce expected response');
+          throw new Error(
+            "HELLO_WORLD action did not produce expected response",
+          );
         }
 
-        logger.info('✓ HELLO_WORLD action executed successfully');
+        logger.info("✓ HELLO_WORLD action executed successfully");
       },
     },
 
     // ===== Provider Tests =====
     {
-      name: 'hello_world_provider_test',
+      name: "hello_world_provider_test",
       fn: async (runtime: IAgentRuntime) => {
         // Test provider functionality if available
         if (!runtime.providers || runtime.providers.length === 0) {
-          logger.info('⚠ No providers found, skipping provider test');
+          logger.info("⚠ No providers found, skipping provider test");
           return;
         }
 
         // Find the HELLO_WORLD_PROVIDER if it exists
         const helloWorldProvider = runtime.providers.find(
-          (p: Provider) => p.name === 'HELLO_WORLD_PROVIDER'
+          (p: Provider) => p.name === "HELLO_WORLD_PROVIDER",
         );
 
         if (!helloWorldProvider) {
-          logger.info('⚠ HELLO_WORLD_PROVIDER not found, skipping provider test');
+          logger.info(
+            "⚠ HELLO_WORLD_PROVIDER not found, skipping provider test",
+          );
           return;
         }
 
@@ -369,7 +403,7 @@ export const ProjectStarterTestSuite: TestSuite = {
           agentId: runtime.agentId,
           roomId: uuidv4() as UUID,
           content: {
-            text: 'test provider',
+            text: "test provider",
             action: null,
           } as Content,
           createdAt: Date.now(),
@@ -379,42 +413,46 @@ export const ProjectStarterTestSuite: TestSuite = {
         const mockState: State = {
           values: {},
           data: {},
-          text: '',
+          text: "",
         };
 
         // Get provider data
-        const providerData = await helloWorldProvider.get(runtime, mockMessage, mockState);
+        const providerData = await helloWorldProvider.get(
+          runtime,
+          mockMessage,
+          mockState,
+        );
 
         // Verify provider returns expected data
-        if (!providerData || typeof providerData !== 'object') {
-          throw new Error('Provider did not return valid data');
+        if (!providerData || typeof providerData !== "object") {
+          throw new Error("Provider did not return valid data");
         }
 
-        logger.info('✓ HELLO_WORLD_PROVIDER returned data successfully');
+        logger.info("✓ HELLO_WORLD_PROVIDER returned data successfully");
       },
     },
 
     // ===== Service Tests =====
     {
-      name: 'starter_service_test',
+      name: "starter_service_test",
       fn: async (runtime: IAgentRuntime) => {
         // Test if the starter service is available
-        const starterService = runtime.getService('starter');
+        const starterService = runtime.getService("starter");
 
         if (!starterService) {
-          logger.info('⚠ Starter service not found, skipping service test');
+          logger.info("⚠ Starter service not found, skipping service test");
           return;
         }
 
         // Services have static start/stop methods, not instance methods
         // Just verify the service exists
-        logger.info('✓ Starter service is available');
+        logger.info("✓ Starter service is available");
       },
     },
 
     // ===== Memory & Database Tests =====
     {
-      name: 'memory_system_should_store_and_retrieve_messages',
+      name: "memory_system_should_store_and_retrieve_messages",
       fn: async (runtime: IAgentRuntime) => {
         try {
           const testRoomId = uuidv4() as UUID;
@@ -424,10 +462,10 @@ export const ProjectStarterTestSuite: TestSuite = {
           await runtime.ensureConnection({
             entityId: testUserId,
             roomId: testRoomId,
-            userName: 'MemoryTestUser',
-            name: 'MemoryTestUser',
-            source: 'test',
-            worldId: uuidv4() as UUID,
+            userName: "MemoryTestUser",
+            name: "MemoryTestUser",
+            source: "test",
+            worldId: testWorldId,
             type: ChannelType.DM,
           });
 
@@ -439,6 +477,7 @@ export const ProjectStarterTestSuite: TestSuite = {
               entityId: testUserId,
               agentId: runtime.agentId,
               roomId: testRoomId,
+              worldId: testWorldId,
               content: {
                 text: `Test message ${i + 1}`,
                 action: null,
@@ -449,36 +488,51 @@ export const ProjectStarterTestSuite: TestSuite = {
             messages.push(message);
 
             // Store the message
-            await runtime.createMemory(message, 'messages', false);
+            await runtime.createMemory(message, "messages", false);
           }
 
           // Retrieve messages
           const retrievedMessages = await runtime.getMemories({
             roomId: testRoomId,
             count: 10,
-            tableName: 'messages',
+            tableName: "messages",
           });
 
           // Verify we got some messages back
           if (!retrievedMessages || retrievedMessages.length === 0) {
-            throw new Error('No messages retrieved from memory system');
+            throw new Error("No messages retrieved from memory system");
           }
 
-          logger.info(`✓ Memory system stored and retrieved ${retrievedMessages.length} messages`);
+          logger.info(
+            `✓ Memory system stored and retrieved ${retrievedMessages.length} messages`,
+          );
         } catch (error) {
           // Memory operations might fail in test environment
-          logger.info('⚠ Memory system test skipped (test environment limitation)');
+          logger.info(
+            "⚠ Memory system test skipped (test environment limitation)",
+          );
         }
       },
     },
 
     // ===== Concurrent Processing Tests =====
     {
-      name: 'agent_should_handle_multiple_concurrent_messages',
+      name: "agent_should_handle_multiple_concurrent_messages",
       fn: async (runtime: IAgentRuntime) => {
         try {
           const testRoomId = uuidv4() as UUID;
           const testUserId = uuidv4() as UUID;
+          const testWorldId = uuidv4() as UUID;
+
+          await runtime.ensureConnection({
+            entityId: testUserId,
+            roomId: testRoomId,
+            userName: "ConcurrentTestUser",
+            name: "ConcurrentTestUser",
+            source: "test",
+            worldId: testWorldId,
+            type: ChannelType.DM,
+          });
 
           // Create multiple messages concurrently
           const messagePromises = Array.from({ length: 5 }, async (_, i) => {
@@ -487,6 +541,7 @@ export const ProjectStarterTestSuite: TestSuite = {
               entityId: testUserId,
               agentId: runtime.agentId,
               roomId: testRoomId,
+              worldId: testWorldId,
               content: {
                 text: `Concurrent message ${i + 1}`,
                 action: null,
@@ -495,61 +550,63 @@ export const ProjectStarterTestSuite: TestSuite = {
               embedding: [],
             };
 
-            return runtime.createMemory(message, 'messages', false);
+            return runtime.createMemory(message, "messages", false);
           });
 
           // Wait for all messages to be created
           await Promise.all(messagePromises);
 
-          logger.info('✓ Successfully handled concurrent message creation');
+          logger.info("✓ Successfully handled concurrent message creation");
         } catch (error) {
-          logger.info('⚠ Concurrent message test skipped (test environment limitation)');
+          logger.info(
+            "⚠ Concurrent message test skipped (test environment limitation)",
+          );
         }
       },
     },
 
     // ===== Configuration Tests =====
     {
-      name: 'project_configuration_should_be_valid',
+      name: "project_configuration_should_be_valid",
       fn: async (runtime: IAgentRuntime) => {
         // Test database connection
         try {
           const connection = await runtime.getConnection();
           if (connection) {
-            logger.info('✓ Database connection is working');
+            logger.info("✓ Database connection is working");
           }
         } catch (error) {
-          logger.info('⚠ Database connection test skipped');
+          logger.info("⚠ Database connection test skipped");
         }
 
         // Verify basic runtime configuration
         if (!runtime.agentId) {
-          throw new Error('Runtime agentId is not configured');
+          throw new Error("Runtime agentId is not configured");
         }
 
         if (!runtime.character) {
-          throw new Error('Runtime character is not configured');
+          throw new Error("Runtime character is not configured");
         }
 
-        logger.info('✓ Project configuration is valid');
+        logger.info("✓ Project configuration is valid");
       },
     },
 
     // ===== Plugin System Tests =====
     {
-      name: 'plugin_initialization_test',
+      name: "plugin_initialization_test",
       fn: async (runtime: IAgentRuntime) => {
         // Test that plugins can be initialized
         if (!runtime.plugins) {
-          throw new Error('Plugin system is not available');
+          throw new Error("Plugin system is not available");
         }
 
         // Verify plugins array exists
         if (!Array.isArray(runtime.plugins)) {
-          throw new Error('Plugins is not an array');
+          throw new Error("Plugins is not an array");
         }
 
-        logger.info('✓ Plugin system allows registration');
+        logger.info("✓ Plugin system allows registration");
 
         // Count loaded plugins
         const pluginCount = runtime.plugins.length;
@@ -558,7 +615,8 @@ export const ProjectStarterTestSuite: TestSuite = {
         // Test specific plugin features if available
         const hasActions = runtime.actions && runtime.actions.length > 0;
         const hasProviders = runtime.providers && runtime.providers.length > 0;
-        const hasEvaluators = runtime.evaluators && runtime.evaluators.length > 0;
+        const hasEvaluators =
+          runtime.evaluators && runtime.evaluators.length > 0;
 
         if (hasActions) {
           logger.info(`  - ${runtime.actions.length} actions registered`);

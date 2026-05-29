@@ -23,9 +23,8 @@ export const komunitasProvider: Provider = {
     if (communities.length === 0) {
       return {
         text: [
-          "Status: Belum ada komunitas terdaftar.",
-          "Onboarding diperlukan sebelum bisa mengelola keuangan.",
-          "Instruksi: Minta user untuk memulai setup dengan mengetik 'buat komunitas baru'.",
+          "Belum ada komunitas.",
+          "Arahkan user: ketik 'buat komunitas baru'.",
         ].join("\n"),
         values: {
           onboardingRequired: true,
@@ -48,12 +47,9 @@ export const komunitasProvider: Provider = {
     });
     return {
       text: [
-        `Komunitas aktif: ${community.name}`,
-        `Tipe: ${community.type}`,
-        `Iuran bulanan: ${rupiah(community.monthlyFee)}`,
-        `Saldo kas: ${rupiah(summary.currentBalance)}`,
-        `Invoice bulan ini: ${paidInvoices.length} paid, ${pendingInvoices.length} pending`,
-        `DOKU sandbox configured: ${service.isDokuConfigured() ? "yes" : "no"}`,
+        `Komunitas: ${community.name} (${community.type})`,
+        `Iuran: ${rupiah(community.monthlyFee)} | Kas: ${rupiah(summary.currentBalance)}`,
+        `Invoice bulan ini: ${paidInvoices.length} paid, ${pendingInvoices.length} pending | DOKU: ${service.isDokuConfigured() ? "yes" : "no"}`,
         communities.length > 1
           ? `Komunitas lain: ${communities
               .slice(1)

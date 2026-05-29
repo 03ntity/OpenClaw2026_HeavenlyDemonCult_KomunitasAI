@@ -3,8 +3,9 @@ import type {
   ActionResult,
   IAgentRuntime,
   Memory,
+  UUID,
 } from "@elizaos/core";
-import { logger } from "@elizaos/core";
+import { ChannelType, createUniqueUuid, logger } from "@elizaos/core";
 import { getKomunitasService, KomunitasService } from "./komunitas-service.ts";
 import { COMMUNITY_WORKFLOW_TASK } from "../scheduler/autonomous-loop.ts";
 import {
@@ -32,14 +33,18 @@ async function upsertElizaWorkflowTask(
   runtime: IAgentRuntime,
   communityId: string,
   intervalMs: number,
+  message?: Memory,
 ) {
   const taskTag = `community:${communityId}`;
   const existing = await runtime.getTasks({
     tags: ["komunitas-scheduler", "community-workflow", taskTag],
   });
+  const scope = await resolveTaskScope(runtime, message);
   const task = {
     name: COMMUNITY_WORKFLOW_TASK,
     description: `Scheduled KomunitasAI workflow for community ${communityId}`,
+    roomId: scope.roomId,
+    worldId: scope.worldId,
     tags: ["komunitas-scheduler", "community-workflow", taskTag, "repeat"],
     metadata: {
       updateInterval: intervalMs,
@@ -53,6 +58,47 @@ async function upsertElizaWorkflowTask(
   }
 
   return runtime.createTask(task);
+}
+
+async function resolveTaskScope(
+  runtime: IAgentRuntime,
+  message?: Memory,
+): Promise<{ roomId: UUID; worldId: UUID }> {
+  let roomId = message?.roomId;
+  let worldId = message?.worldId;
+
+  if (roomId && !worldId) {
+    worldId = (await runtime.getRoom(roomId))?.worldId;
+  }
+
+  if (roomId && worldId) return { roomId, worldId };
+
+  return ensureSchedulerTaskScope(runtime);
+}
+
+async function ensureSchedulerTaskScope(
+  runtime: IAgentRuntime,
+): Promise<{ roomId: UUID; worldId: UUID }> {
+  const worldId = createUniqueUuid(runtime, "komunitas-scheduler-world");
+  const roomId = createUniqueUuid(runtime, "komunitas-scheduler-room");
+
+  await runtime.ensureWorldExists({
+    id: worldId,
+    agentId: runtime.agentId,
+    name: "KomunitasAI Scheduler",
+    metadata: { source: "komunitas-scheduler" },
+  });
+  await runtime.ensureRoomExists({
+    id: roomId,
+    name: "KomunitasAI Scheduler",
+    source: "komunitas-scheduler",
+    type: ChannelType.API,
+    channelId: roomId,
+    worldId,
+  });
+  await runtime.ensureParticipantInRoom(runtime.agentId, roomId);
+
+  return { roomId, worldId };
 }
 
 async function deleteElizaWorkflowTasks(
@@ -1800,6 +1846,7 @@ Jawab HANYA dengan JSON: {"action":"set","intervalMs":60000} atau {"action":"can
       runtime,
       community.id,
       intervalMs,
+      message,
     );
 
     const humanInterval =

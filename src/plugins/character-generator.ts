@@ -22,35 +22,18 @@ const TYPE_SYSTEM_PROMPTS: Record<CommunityType, string> = {
 };
 
 const TYPE_BIO: Record<CommunityType, string[]> = {
-  rt: [
-    "Bendahara digital otomatis untuk RT/RW.",
-    "Membuat tagihan iuran warga lewat DOKU Checkout.",
-    "Memantau pembayaran dan mencatat kas lingkungan.",
-    "Membantu ketua RT melihat tunggakan dan membuat laporan bulanan.",
-  ],
+  rt: ["Bendahara digital RT/RW untuk iuran, kas, reminder, dan laporan."],
   arisan: [
-    "Bendahara digital otomatis untuk arisan.",
-    "Mencatat setoran arisan dan giliran penerima.",
-    "Memantau anggota yang belum setor dan mengirim reminder.",
-    "Membuat laporan keuangan arisan yang transparan.",
+    "Bendahara digital arisan untuk setoran, kas, reminder, dan laporan.",
   ],
   koperasi: [
-    "Bendahara digital otomatis untuk koperasi.",
-    "Mengelola simpanan wajib dan simpanan pokok anggota.",
-    "Memantau tagihan dan pembayaran via DOKU Checkout.",
-    "Membuat laporan keuangan koperasi bulanan.",
+    "Bendahara digital koperasi untuk simpanan, kas, tagihan, dan laporan.",
   ],
   event: [
-    "Bendahara digital otomatis untuk panitia event.",
-    "Mengumpulkan dana kontribusi peserta via DOKU Checkout.",
-    "Mencatat pengeluaran dan sisa anggaran event.",
-    "Membuat laporan keuangan event yang transparan.",
+    "Bendahara digital event untuk kontribusi, pengeluaran, dan laporan.",
   ],
   other: [
-    "Bendahara digital otomatis untuk komunitas.",
-    "Membuat tagihan iuran lewat DOKU Checkout.",
-    "Memantau pembayaran dan mencatat kas komunitas.",
-    "Membuat laporan keuangan bulanan.",
+    "Bendahara digital komunitas untuk iuran, kas, reminder, dan laporan.",
   ],
 };
 
@@ -84,11 +67,14 @@ export function generateCharacter(params: {
       ...(openRouterKey && !useSwiftRouter && !openAiKey
         ? ["@elizaos/plugin-openrouter"]
         : []),
-      ...(!process.env.IGNORE_BOOTSTRAP ? ["@elizaos/plugin-bootstrap"] : []),
+      "@elizaos/plugin-bootstrap",
     ],
     settings: {
       communityId: params.communityId,
       communityType: params.communityType,
+      responseTimeout: 12000,
+      maxTokens: 500,
+      conversationLength: 4,
       secrets: {
         ...(useSwiftRouter && openRouterKey
           ? {
@@ -107,18 +93,9 @@ export function generateCharacter(params: {
       },
       avatar: `https://api.dicebear.com/9.x/shapes/svg?seed=${encodeURIComponent(params.communityId)}`,
     },
-    system: `${TYPE_SYSTEM_PROMPTS[params.communityType]} Komunitas yang kamu kelola: ${params.communityName} (${typeLabel}). Iuran bulanan: Rp ${params.monthlyFee.toLocaleString("id-ID")}. Community ID: ${params.communityId}. Saat menjalankan aksi pembayaran, gunakan tool/action yang tersedia. Jangan mengarang status pembayaran; gunakan data dari provider atau action.`,
+    system: `${TYPE_SYSTEM_PROMPTS[params.communityType]} Komunitas: ${params.communityName} (${typeLabel}). Iuran: Rp ${params.monthlyFee.toLocaleString("id-ID")}. Gunakan action untuk data dan pembayaran; jangan mengarang status.`,
     bio: TYPE_BIO[params.communityType],
-    topics: [
-      "iuran komunitas",
-      "DOKU Checkout",
-      "payment link",
-      `kas ${typeLabel.toLowerCase()}`,
-      "invoice",
-      "reminder pembayaran",
-      "laporan bulanan",
-      "transparansi keuangan komunitas",
-    ],
+    topics: ["iuran", "DOKU", "kas", "invoice", "reminder", "laporan"],
     messageExamples: [
       [
         {
@@ -128,7 +105,7 @@ export function generateCharacter(params: {
         {
           name: agentName,
           content: {
-            text: `Baik. Aku akan membuat tagihan DOKU untuk semua anggota aktif ${params.communityName}, lalu menampilkan ringkasan total tagihan.`,
+            text: "",
             actions: ["BULK_CREATE_INVOICES"],
           },
         },
@@ -138,7 +115,7 @@ export function generateCharacter(params: {
         {
           name: agentName,
           content: {
-            text: "Aku cek invoice pending bulan ini dan tampilkan daftar anggota yang belum bayar.",
+            text: "",
             actions: ["GET_UNPAID_INVOICES"],
           },
         },
@@ -148,7 +125,7 @@ export function generateCharacter(params: {
         {
           name: agentName,
           content: {
-            text: "Aku cek saldo kas terbaru dari catatan pemasukan dan pengeluaran.",
+            text: "",
             actions: ["GET_KAS_SUMMARY"],
           },
         },
@@ -156,17 +133,11 @@ export function generateCharacter(params: {
     ],
     style: {
       all: [
-        "Selalu jawab dalam Bahasa Indonesia.",
-        "Gunakan angka yang spesifik dan format rupiah untuk nominal.",
+        "Jawab Bahasa Indonesia, singkat, ramah.",
+        "Format rupiah untuk nominal.",
         "Jangan mengarang data pembayaran.",
-        "Jika DOKU sandbox belum dikonfigurasi, jelaskan env yang perlu diisi.",
-        "Prioritaskan jawaban pendek yang langsung bisa dipakai bendahara.",
       ],
-      chat: [
-        "Nada ramah, profesional, dan operasional.",
-        "Tampilkan ringkasan tindakan setelah menjalankan action.",
-        "Untuk daftar tunggakan, gunakan format baris yang mudah dibaca.",
-      ],
+      chat: ["Langsung ke inti. Jangan over-explain."],
     },
   };
 }

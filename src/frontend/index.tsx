@@ -108,6 +108,13 @@ type ActionResult = {
   [key: string]: unknown;
 };
 
+type LightweightReplyResult = {
+  handled?: boolean;
+  mode?: "llm" | "skill" | "agent";
+  actionName?: string;
+  text?: string;
+};
+
 const formatRupiah = (value: number) =>
   new Intl.NumberFormat("id-ID", {
     style: "currency",
@@ -127,9 +134,7 @@ const formatDate = (value?: string) => {
 const apiBase = () => window.ELIZA_CONFIG?.apiBase?.replace(/\/$/, "") ?? "";
 const pluginApiBase = () => `${apiBase()}/komunitas-ai`;
 const isUuid = (value: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-    value,
-  );
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const base = path.startsWith("/api/v1") ? pluginApiBase() : apiBase();
@@ -1277,6 +1282,17 @@ async function sendChatMessage(agentId: string, text: string): Promise<string> {
     throw new Error("Agent belum siap. Tunggu daftar agent selesai dimuat.");
   }
 
+  const lightweightReply = await requestJson<LightweightReplyResult>(
+    "/api/v1/agent/lightweight-reply",
+    {
+      method: "POST",
+      body: JSON.stringify({ agentId, text }),
+    },
+  ).catch(() => null);
+  if (lightweightReply?.handled && lightweightReply.text?.trim()) {
+    return lightweightReply.text;
+  }
+
   const base = apiBase();
   const dashboardUserId = "11111111-1111-1111-1111-111111111111";
   const submittedAt = Date.now();
@@ -1286,62 +1302,24 @@ async function sendChatMessage(agentId: string, text: string): Promise<string> {
   const messageServerId =
     serverData?.data?.messageServers?.[0]?.id ??
     "00000000-0000-0000-0000-000000000000";
-
-  const channelResponse = await fetch(`${base}/api/messaging/channels`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name: `dashboard-${agentId}-${crypto.randomUUID()}`,
-      message_server_id: messageServerId,
-      participantCentralUserIds: [dashboardUserId],
-      type: "GROUP",
-      metadata: { dashboard: true, agentId },
-    }),
-  });
-  const channelData = await channelResponse.json().catch(() => ({}));
-  if (!channelResponse.ok) {
-    throw new Error(
-      channelData?.error?.message ??
-        channelData?.error ??
-        `Gagal membuat channel chat (${channelResponse.status})`,
-    );
-  }
-  const channelId = channelData?.data?.id;
-  if (!channelId) throw new Error("Channel chat tidak ditemukan.");
-
-  const addAgentResponse = await fetch(
-    `${base}/api/messaging/channels/${channelId}/agents`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId }),
-    },
-  );
-  const addAgentData = await addAgentResponse.json().catch(() => ({}));
-  if (!addAgentResponse.ok) {
-    throw new Error(
-      addAgentData?.error?.message ??
-        addAgentData?.error ??
-        `Gagal menambahkan agent ke channel (${addAgentResponse.status})`,
-    );
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  const channelId = crypto.randomUUID();
 
   const response = await fetch(
     `${base}/api/messaging/channels/${channelId}/messages`,
     {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         channelId,
         message_server_id: messageServerId,
         author_id: dashboardUserId,
         content: text,
-        source_type: "dashboard",
+        source_type: "client_chat",
+        transport: "http",
         metadata: {
           dashboard: true,
           agentId,
+          targetAgentId: agentId,
           user_display_name: "Dashboard User",
         },
       }),
@@ -1349,8 +1327,11 @@ async function sendChatMessage(agentId: string, text: string): Promise<string> {
   );
   const data = await response.json().catch(() => ({}));
   if (response.ok) {
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      await new Promise((r) => setTimeout(r, attempt < 2 ? 1500 : 2500));
+    const syncReply = pickSynchronousAgentReply(data, agentId, submittedAt);
+    if (syncReply) return syncReply;
+
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await new Promise((r) => setTimeout(r, attempt === 0 ? 400 : 1000));
       const directReply = await fetchAgentReplyFromChannel(
         base,
         channelId,
@@ -1359,6 +1340,7 @@ async function sendChatMessage(agentId: string, text: string): Promise<string> {
       );
       if (directReply) return directReply;
 
+      if (attempt < 2) continue;
       const fallbackReply = await fetchLatestAgentReplyFromAnyChannel(
         base,
         agentId,
@@ -1370,6 +1352,49 @@ async function sendChatMessage(agentId: string, text: string): Promise<string> {
   if (data?.error)
     return `Error: ${typeof data.error === "string" ? data.error : JSON.stringify(data.error)}`;
   return "Pesan sudah dikirim, tapi respons agent belum muncul di widget ini. Cek chat utama atau coba lagi beberapa saat lagi.";
+}
+
+function pickSynchronousAgentReply(
+  data: any,
+  agentId: string,
+  submittedAt: number,
+): string | null {
+  const directText =
+    data?.agentResponse?.text ??
+    data?.data?.agentResponse?.text ??
+    data?.data?.response?.text ??
+    data?.data?.text ??
+    data?.response?.text ??
+    data?.text;
+  if (typeof directText === "string" && directText.trim()) return directText;
+
+  const messageCandidates = [
+    data?.agentResponse,
+    data?.data?.agentResponse,
+    data?.data?.message,
+    data?.data?.response,
+    data?.message,
+    data?.response,
+  ].filter(Boolean);
+  const directMessage = pickLatestAgentMessage(
+    messageCandidates,
+    agentId,
+    submittedAt,
+  );
+  if (directMessage) return directMessage;
+
+  const messageLists = [
+    data?.data?.messages,
+    data?.messages,
+    data?.data?.responses,
+    data?.responses,
+  ].filter(Array.isArray);
+  for (const messages of messageLists) {
+    const reply = pickLatestAgentMessage(messages, agentId, submittedAt);
+    if (reply) return reply;
+  }
+
+  return null;
 }
 
 async function fetchAgentReplyFromChannel(
@@ -1440,7 +1465,9 @@ function pickLatestAgentMessage(
       const isRecent = !createdAt || createdAt >= submittedAt - 1000;
       return author === agentId && isRecent;
     })
-    .sort((a: any, b: any) => getMessageTimestamp(b) - getMessageTimestamp(a))[0];
+    .sort(
+      (a: any, b: any) => getMessageTimestamp(b) - getMessageTimestamp(a),
+    )[0];
   const content =
     typeof agentMsg?.content === "string"
       ? agentMsg.content
@@ -1449,8 +1476,7 @@ function pickLatestAgentMessage(
 }
 
 function getMessageTimestamp(message: any) {
-  const raw =
-    message.created_at ?? message.createdAt ?? message.timestamp ?? 0;
+  const raw = message.created_at ?? message.createdAt ?? message.timestamp ?? 0;
   if (typeof raw === "number") return raw;
   const parsed = Date.parse(String(raw));
   return Number.isFinite(parsed) ? parsed : 0;

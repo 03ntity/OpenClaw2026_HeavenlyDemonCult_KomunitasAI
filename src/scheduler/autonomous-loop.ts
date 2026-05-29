@@ -1,5 +1,5 @@
-import type { IAgentRuntime, TaskWorker } from "@elizaos/core";
-import { logger } from "@elizaos/core";
+import type { IAgentRuntime, TaskWorker, UUID } from "@elizaos/core";
+import { ChannelType, createUniqueUuid, logger } from "@elizaos/core";
 import { KomunitasService } from "../plugins/komunitas-service.ts";
 
 const BILLING_TASK = "KOMUNITAS_BILLING_LOOP";
@@ -140,7 +140,10 @@ export const communityWorkflowTaskWorker: TaskWorker = {
       options.communityId ?? task.metadata?.communityId ?? "",
     );
     if (!communityId) {
-      logger.warn({ taskId: task.id }, "Community workflow task missing communityId");
+      logger.warn(
+        { taskId: task.id },
+        "Community workflow task missing communityId",
+      );
       return;
     }
 
@@ -149,7 +152,10 @@ export const communityWorkflowTaskWorker: TaskWorker = {
       result.billing = await service.bulkCreateInvoices({ communityId });
     } catch (err) {
       result.billingError = err instanceof Error ? err.message : String(err);
-      logger.warn({ communityId, err }, "Community workflow billing step failed");
+      logger.warn(
+        { communityId, err },
+        "Community workflow billing step failed",
+      );
     }
 
     try {
@@ -166,11 +172,17 @@ export const communityWorkflowTaskWorker: TaskWorker = {
       result.reminders = await service.sendPaymentReminders({ communityId });
     } catch (err) {
       result.reminderError = err instanceof Error ? err.message : String(err);
-      logger.warn({ communityId, err }, "Community workflow reminder step failed");
+      logger.warn(
+        { communityId, err },
+        "Community workflow reminder step failed",
+      );
     }
 
     await service.recordScheduledWorkflowCompleted(communityId, result);
-    logger.info({ communityId, taskId: task.id }, "Community workflow task completed");
+    logger.info(
+      { communityId, taskId: task.id },
+      "Community workflow task completed",
+    );
   },
 };
 
@@ -179,6 +191,7 @@ export async function startScheduler(runtime: IAgentRuntime): Promise<void> {
   runtime.registerTaskWorker(monitoringTaskWorker);
   runtime.registerTaskWorker(reportTaskWorker);
   runtime.registerTaskWorker(communityWorkflowTaskWorker);
+  const taskScope = await ensureSchedulerTaskScope(runtime);
 
   const existingTasks = await runtime.getTasks({
     tags: ["komunitas-scheduler"],
@@ -190,6 +203,8 @@ export async function startScheduler(runtime: IAgentRuntime): Promise<void> {
       name: BILLING_TASK,
       description:
         "Monthly billing loop — creates invoices for all communities on day 1",
+      roomId: taskScope.roomId,
+      worldId: taskScope.worldId,
       tags: ["komunitas-scheduler", "repeat"],
       metadata: {
         updateInterval: ONE_DAY_MS,
@@ -203,6 +218,8 @@ export async function startScheduler(runtime: IAgentRuntime): Promise<void> {
       name: MONITORING_TASK,
       description:
         "Payment monitoring loop — checks pending invoices every 6 hours",
+      roomId: taskScope.roomId,
+      worldId: taskScope.worldId,
       tags: ["komunitas-scheduler", "repeat"],
       metadata: {
         updateInterval: SIX_HOURS_MS,
@@ -216,6 +233,8 @@ export async function startScheduler(runtime: IAgentRuntime): Promise<void> {
       name: REPORT_TASK,
       description:
         "Monthly report loop — generates reports on last day of month",
+      roomId: taskScope.roomId,
+      worldId: taskScope.worldId,
       tags: ["komunitas-scheduler", "repeat"],
       metadata: {
         updateInterval: ONE_DAY_MS,
@@ -227,6 +246,31 @@ export async function startScheduler(runtime: IAgentRuntime): Promise<void> {
   }
 
   logger.info("KomunitasAI autonomous task workers started");
+}
+
+async function ensureSchedulerTaskScope(
+  runtime: IAgentRuntime,
+): Promise<{ roomId: UUID; worldId: UUID }> {
+  const worldId = createUniqueUuid(runtime, "komunitas-scheduler-world");
+  const roomId = createUniqueUuid(runtime, "komunitas-scheduler-room");
+
+  await runtime.ensureWorldExists({
+    id: worldId,
+    agentId: runtime.agentId,
+    name: "KomunitasAI Scheduler",
+    metadata: { source: "komunitas-scheduler" },
+  });
+  await runtime.ensureRoomExists({
+    id: roomId,
+    name: "KomunitasAI Scheduler",
+    source: "komunitas-scheduler",
+    type: ChannelType.API,
+    channelId: roomId,
+    worldId,
+  });
+  await runtime.ensureParticipantInRoom(runtime.agentId, roomId);
+
+  return { roomId, worldId };
 }
 
 export async function runBillingLoopManual(

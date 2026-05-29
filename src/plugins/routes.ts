@@ -1,6 +1,8 @@
 import type { RouteRequest, RouteResponse } from "@elizaos/core";
+import { createHash, randomUUID } from "node:crypto";
 import { getKomunitasService } from "./komunitas-service.ts";
 import { routeJson } from "./helpers.ts";
+import { routeKomunitasMessage } from "./skill-router.ts";
 import { normalizeWahaPhone } from "./waha-client.ts";
 import {
   rtRwCharacter,
@@ -264,6 +266,21 @@ export const wahaWebhookRoute = {
         return routeJson(res, { status: "ok", memberFound: false });
       }
 
+      const routed = await routeKomunitasMessage(runtime, messageText, {
+        phone,
+        communityId: memberMatch.member.communityId,
+        source: "whatsapp",
+      });
+      if (routed.handled) {
+        await sendWahaSafely(service, phone, routed.text);
+        return routeJson(res, {
+          status: "ok",
+          memberFound: true,
+          routed: routed.mode,
+          actionName: routed.actionName,
+        });
+      }
+
       await sendWahaSafely(
         service,
         phone,
@@ -274,6 +291,7 @@ export const wahaWebhookRoute = {
         phone,
         messageText,
         memberMatch.member.communityId,
+        runtime.agentId,
       );
 
       await sendWahaSafely(service, phone, agentResponse);
@@ -377,6 +395,26 @@ export const dokuMcpCallToolRoute = {
   },
 };
 
+export const lightweightReplyRoute = {
+  name: "komunitas-skill-reply",
+  path: "/api/v1/agent/lightweight-reply",
+  type: "POST" as const,
+  rawPath: true,
+  handler: async (req: RouteRequest, res: RouteResponse, runtime: any) => {
+    const body = ((req as any).body ?? {}) as Record<string, unknown>;
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (!text) return routeJson(res, { handled: false });
+
+    routeJson(
+      res,
+      await routeKomunitasMessage(runtime, text, {
+        ...(typeof body.agentId === "string" ? { agentId: body.agentId } : {}),
+        source: "dashboard",
+      }),
+    );
+  },
+};
+
 export const allRoutes = [
   summaryRoute,
   sendRemindersRoute,
@@ -393,6 +431,7 @@ export const allRoutes = [
   charactersRoute,
   dokuMcpToolsRoute,
   dokuMcpCallToolRoute,
+  lightweightReplyRoute,
 ];
 
 function extractWahaPhone(from: unknown): string {
@@ -434,85 +473,65 @@ async function submitWahaMessageToAgent(
   phone: string,
   content: string,
   communityId: string,
+  agentId?: string,
 ): Promise<string> {
+  if (!agentId) return "Pesan kamu sudah diterima oleh BendaharaAI.";
+
   const port = process.env.SERVER_PORT ?? 3000;
   const baseUrl = `http://localhost:${port}`;
-  const channelId = `waha-${phone}`;
+  const channelId = randomUUID();
+  const authorId = uuidFromText(`waha:${phone}`);
 
-  const submittedAt = Date.now();
-  const response = await fetch(`${baseUrl}/api/messaging/submit`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      channel_id: channelId,
-      message_server_id: "00000000-0000-0000-0000-000000000000",
-      author_id: phone,
-      content,
-      source_type: "whatsapp",
-      metadata: { phone, communityId },
-    }),
-  });
+  const serverResponse = await fetch(
+    `${baseUrl}/api/messaging/message-servers`,
+  );
+  const serverData = await serverResponse.json().catch(() => ({}));
+  const messageServerId =
+    serverData?.data?.messageServers?.[0]?.id ??
+    "00000000-0000-0000-0000-000000000000";
+
+  const response = await fetch(
+    `${baseUrl}/api/messaging/channels/${channelId}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message_server_id: messageServerId,
+        author_id: authorId,
+        content,
+        source_type: "client_chat",
+        transport: "http",
+        metadata: {
+          phone,
+          communityId,
+          targetAgentId: agentId,
+          user_display_name: phone,
+        },
+      }),
+    },
+  );
 
   if (!response.ok) {
-    throw new Error(`ElizaOS messaging submit failed: ${response.status}`);
+    throw new Error(`ElizaOS messaging failed: ${response.status}`);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  const body = await response.json().catch(() => ({}));
   return (
-    (await fetchLatestAgentMessage(baseUrl, channelId, submittedAt)) ??
-    "Pesan kamu sudah diterima oleh BendaharaAI."
+    extractAgentText(body) ?? "Pesan kamu sudah diterima oleh BendaharaAI."
   );
 }
 
-async function fetchLatestAgentMessage(
-  baseUrl: string,
-  channelId: string,
-  submittedAt: number,
-): Promise<string | null> {
-  const candidates = [
-    `/api/messaging/channels/${encodeURIComponent(channelId)}/messages`,
-    `/api/messaging/messages?channel_id=${encodeURIComponent(channelId)}`,
-  ];
-
-  for (const path of candidates) {
-    try {
-      const response = await fetch(`${baseUrl}${path}`);
-      if (!response.ok) continue;
-      const body = await response.json();
-      const messages = Array.isArray(body)
-        ? body
-        : Array.isArray(body?.messages)
-          ? body.messages
-          : Array.isArray(body?.data)
-            ? body.data
-            : [];
-      const agentMessages = messages
-        .filter((message: any) => {
-          const createdAt = Date.parse(
-            message.createdAt ?? message.created_at ?? message.timestamp ?? "",
-          );
-          const isRecent = Number.isNaN(createdAt) || createdAt >= submittedAt;
-          const author = String(message.author_id ?? message.authorId ?? "");
-          return isRecent && author !== phoneLikeAuthor(channelId);
-        })
-        .map((message: any) =>
-          typeof message.content === "string"
-            ? message.content
-            : (message.content?.text ?? message.text),
-        )
-        .filter(
-          (text: unknown): text is string =>
-            typeof text === "string" && text.trim().length > 0,
-        );
-      if (agentMessages.length > 0) return agentMessages.at(-1) ?? null;
-    } catch {
-      continue;
-    }
-  }
-
-  return null;
+function extractAgentText(body: any): string | null {
+  const text =
+    body?.agentResponse?.text ??
+    body?.data?.agentResponse?.text ??
+    body?.response?.text ??
+    body?.data?.response?.text ??
+    body?.text;
+  return typeof text === "string" && text.trim() ? text : null;
 }
 
-function phoneLikeAuthor(channelId: string) {
-  return channelId.replace(/^waha-/, "");
+function uuidFromText(value: string): string {
+  const hex = createHash("sha256").update(value).digest("hex").slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }

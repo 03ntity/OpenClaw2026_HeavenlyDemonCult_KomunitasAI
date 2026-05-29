@@ -423,10 +423,15 @@ export class KomunitasService extends Service {
     let waSkippedDuplicate = 0;
     let waFailed = 0;
 
-    let waTemplate: string | null = null;
-    if (params.runtime && this.wahaClient.isConfigured) {
+    const waTemplate = `Halo {{nama}}! 👋\n\nTagihan ${community.name} bulan {{periode}} sebesar {{nominal}} telah dibuat.\n\n💳 {{link}}\n\nTerima kasih 🙏`;
+    let aiWaTemplate: string | null = null;
+    if (
+      process.env.KOMUNITAS_USE_AI_WA_TEMPLATE === "true" &&
+      params.runtime &&
+      this.wahaClient.isConfigured
+    ) {
       try {
-        waTemplate =
+        aiWaTemplate =
           (await generateTextSafe(
             params.runtime,
             `Kamu adalah bendahara digital komunitas "${community.name}" (tipe: ${community.type}).
@@ -442,64 +447,66 @@ Pesan harus:
 Jawab HANYA dengan teks pesan, tanpa penjelasan.`,
           )) || null;
       } catch {
-        waTemplate = null;
+        aiWaTemplate = null;
       }
     }
 
-    for (const member of members) {
-      try {
-        const result = await this.createPaymentLinkForMember({
-          communityId: community.id,
-          memberId: member.id,
-          period,
-          amount,
-          dueDays: params.dueDays ?? 7,
-        });
-        if (!result.created) {
-          skipped.push(member);
-          continue;
-        }
-        created.push(result.invoice);
-
-        if (this.wahaClient.isConfigured && member.phone) {
-          const inv = result.invoice;
-          const waMsg = waTemplate
-            ? waTemplate
-                .replace(/\{\{nama\}\}/g, member.name)
-                .replace(/\{\{nominal\}\}/g, rupiah(amount))
-                .replace(/\{\{periode\}\}/g, period)
-                .replace(/\{\{link\}\}/g, inv.paymentLink || "-")
-            : `Halo ${member.name}! 👋\n\nTagihan ${community.name} bulan ${period} sebesar ${rupiah(amount)} telah dibuat.\n\n💳 ${inv.paymentLink || "-"}\n\nTerima kasih 🙏`;
-          const delivery = await this.sendWhatsAppOnce({
+    await mapWithConcurrency(
+      members,
+      getPositiveIntEnv("KOMUNITAS_BULK_CONCURRENCY", 4),
+      async (member) => {
+        try {
+          const result = await this.createPaymentLinkForMember({
             communityId: community.id,
-            notificationKey: `invoice-created:${community.id}:${member.id}:${period}:${amount}`,
-            phone: member.phone,
-            text: waMsg,
-            logAction: "invoice_notification_sent",
-            logDetails: {
-              invoiceId: inv.id,
-              memberId: member.id,
-              period,
-              channel: "whatsapp",
-            },
-            failureLogAction: "invoice_notification_failed",
-            failureLogDetails: {
-              invoiceId: inv.id,
-              memberId: member.id,
-              period,
-            },
+            memberId: member.id,
+            period,
+            amount,
+            dueDays: params.dueDays ?? 7,
           });
-          if (delivery === "sent") waSent += 1;
-          if (delivery === "skipped") waSkippedDuplicate += 1;
-          if (delivery === "failed") waFailed += 1;
+          if (!result.created) {
+            skipped.push(member);
+            return;
+          }
+          created.push(result.invoice);
+
+          if (this.wahaClient.isConfigured && member.phone) {
+            const inv = result.invoice;
+            const waMsg = (aiWaTemplate ?? waTemplate)
+              .replace(/\{\{nama\}\}/g, member.name)
+              .replace(/\{\{nominal\}\}/g, rupiah(amount))
+              .replace(/\{\{periode\}\}/g, period)
+              .replace(/\{\{link\}\}/g, inv.paymentLink || "-");
+            const delivery = await this.sendWhatsAppOnce({
+              communityId: community.id,
+              notificationKey: `invoice-created:${community.id}:${member.id}:${period}:${amount}`,
+              phone: member.phone,
+              text: waMsg,
+              logAction: "invoice_notification_sent",
+              logDetails: {
+                invoiceId: inv.id,
+                memberId: member.id,
+                period,
+                channel: "whatsapp",
+              },
+              failureLogAction: "invoice_notification_failed",
+              failureLogDetails: {
+                invoiceId: inv.id,
+                memberId: member.id,
+                period,
+              },
+            });
+            if (delivery === "sent") waSent += 1;
+            if (delivery === "skipped") waSkippedDuplicate += 1;
+            if (delivery === "failed") waFailed += 1;
+          }
+        } catch (error) {
+          errors.push({
+            member,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
-      } catch (error) {
-        errors.push({
-          member,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
+      },
+    );
 
     await this.log(community.id, "bulk_invoice_created", {
       period,
@@ -521,29 +528,33 @@ Jawab HANYA dengan teks pesan, tanpa penjelasan.`,
     const paid: Invoice[] = [];
     const unchanged: Invoice[] = [];
 
-    for (const invoice of pending) {
-      try {
-        const status = await this.doku.checkPaymentStatus(
-          invoice.dokuInvoiceId,
-        );
-        const normalized = String(status.status).toUpperCase();
-        if (normalized === "SUCCESS" || normalized === "PAID") {
-          paid.push(await this.markInvoicePaid(invoice.id, status.paidAt));
-        } else {
+    await mapWithConcurrency(
+      pending,
+      getPositiveIntEnv("KOMUNITAS_DOKU_STATUS_CONCURRENCY", 4),
+      async (invoice) => {
+        try {
+          const status = await this.doku.checkPaymentStatus(
+            invoice.dokuInvoiceId,
+          );
+          const normalized = String(status.status).toUpperCase();
+          if (normalized === "SUCCESS" || normalized === "PAID") {
+            paid.push(await this.markInvoicePaid(invoice.id, status.paidAt));
+          } else {
+            unchanged.push(invoice);
+          }
+        } catch (error) {
+          logger.warn(
+            {
+              invoiceId: invoice.id,
+              dokuInvoiceId: invoice.dokuInvoiceId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            "DOKU payment status check failed, continuing with next invoice",
+          );
           unchanged.push(invoice);
         }
-      } catch (error) {
-        logger.warn(
-          {
-            invoiceId: invoice.id,
-            dokuInvoiceId: invoice.dokuInvoiceId,
-            error: error instanceof Error ? error.message : String(error),
-          },
-          "DOKU payment status check failed, continuing with next invoice",
-        );
-        unchanged.push(invoice);
-      }
-    }
+      },
+    );
 
     await this.log(id, "payment_monitoring_completed", {
       checkedCount: pending.length,
@@ -1045,3 +1056,26 @@ const getAdminWhatsAppPhones = () =>
     .split(",")
     .map((phone) => phone.trim())
     .filter(Boolean);
+
+function getPositiveIntEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+async function mapWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        await worker(items[currentIndex], currentIndex);
+      }
+    }),
+  );
+}
